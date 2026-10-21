@@ -16,7 +16,7 @@ from datetime import datetime, timedelta
 
 IS_WIN = sys.platform.startswith("win")
 APP_NAME = "NS签到助手"
-VERSION = "1.1.0"
+VERSION = "1.1.1"
 SITE = "https://www.nodeseek.com"
 API_PATH = "/api/attendance"
 
@@ -185,13 +185,12 @@ async (rv) => {
 NEED_LOGIN_MARKERS = ("登录", "login", "sign in", "注册")
 
 def looks_logged_out(page_html):
+    """未登录判定：站点真实标志（陌生人欢迎语 / signIn.html 入口 / 密码输入框）。"""
     h = (page_html or "")
-    if re.search(r'href="/signin"|/api/auth/login|input[^>]+type=["\']password', h, re.I):
+    if "陌生人" in h:
         return True
-    low = h.lower()
-    if "logout" not in low and "退出登录" not in h:
-        if re.search(r"sign[\s_-]?in\b|log[\s_-]?in\b|login\b", low) or "登录" in h:
-            return True
+    if re.search(r'signIn\.html|/api/auth/login|input[^>]+type=["\']password', h, re.I):
+        return True
     return False
 
 def parse_checkin(status, text):
@@ -387,20 +386,20 @@ def open_login_window(ui_cb=None):
             ctx, ch = make_context(pw, headless=False)
             try:
                 page = ctx.new_page()
-                page.goto(SITE + "/signin", wait_until="domcontentloaded", timeout=60000)
+                page.goto(SITE + "/signIn.html", wait_until="domcontentloaded", timeout=60000)
                 try:
                     page.set_default_timeout(30000)
                 except Exception:
                     pass
                 if ui_cb:
                     ui_cb("login_open", "浏览器已打开（%s），请完成登录，成功后自动关闭" % ch)
-                deadline = time.time() + 300
+                # 成功标志：浏览器里出现非空 session cookie（NS 登录成功后服务端下发）
+                deadline = time.time() + 600
                 while time.time() < deadline:
-                    time.sleep(3)
+                    time.sleep(2)
                     try:
-                        url = page.url or ""
-                        html = page.content()[:20000]
-                        if "/signin" not in url and not looks_logged_out(html):
+                        cks = ctx.cookies(SITE)
+                        if any(c.get("name") == "session" and c.get("value") for c in cks):
                             time.sleep(2)
                             save_cookies(ctx)
                             if ui_cb:
@@ -408,7 +407,7 @@ def open_login_window(ui_cb=None):
                             return {"kind": "ok", "msg": "登录态已保存"}
                     except Exception:
                         pass
-                return {"kind": "retry", "msg": "5 分钟内未检测到登录，窗口已关闭"}
+                return {"kind": "retry", "msg": "10 分钟内未检测到登录，窗口已关闭"}
             finally:
                 try:
                     ctx.close()
