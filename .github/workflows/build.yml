@@ -1,0 +1,38 @@
+name: Build Windows EXE
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'ns_signin.py'
+      - '.github/workflows/build.yml'
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install deps
+        run: |
+          pip install --upgrade pip
+          pip install playwright pyinstaller
+          playwright install chromium
+
+      - name: Build EXE
+        run: |
+          pyinstaller --noconfirm --onefile --windowed --name "NS签到助手" `
+            --collect-all playwright ns_signin.py
+
+      - name: Smoke test import
+        run: python -c "import ast; ast.parse(open('ns_signin.py', encoding='utf-8').read()); print('syntax ok')"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: NS签到助手-win64
+          path: dist/NS签到助手.exe
+          if-no-files-found: error

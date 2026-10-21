@@ -1,0 +1,6 @@
+ns_data/
+test_profile/
+__pycache__/
+build/
+dist/
+*.spec
