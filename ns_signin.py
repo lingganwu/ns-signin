@@ -16,7 +16,7 @@ from datetime import datetime, timedelta
 
 IS_WIN = sys.platform.startswith("win")
 APP_NAME = "NS签到助手"
-VERSION = "1.1.1"
+VERSION = "1.1.2"
 SITE = "https://www.nodeseek.com"
 API_PATH = "/api/attendance"
 
@@ -277,6 +277,17 @@ def inject_cookies(ctx):
         log("注入 cookie 失败: %s" % e)
         return False
 
+def login_snapshot_state():
+    """检查本地登录态快照。返回 (kind, text, color)。"""
+    if STATE.get("need_login"):
+        return "expired", "登录已失效，请重新点登录", "red"
+    cks = load_json(COOKIES_FILE, [])
+    if isinstance(cks, list) and cks:
+        if any(c.get("name") == "session" and c.get("value") for c in cks):
+            return "saved", "已保存登录态", "green"
+        return "partial", "已存 cookie 但缺 session，建议重新登录", "orange"
+    return "none", "未登录", "gray"
+
 def do_checkin(headless=True):
     """执行一次签到。返回 dict(kind, msg)。kind ∈ ok/already/needlogin/retry/fail"""
     try:
@@ -507,7 +518,8 @@ def build_ui():
     except Exception:
         pass
 
-    status_var = tk.StringVar(value="就绪")
+    status_var = tk.StringVar(value="正在检查登录态…")
+    login_var = tk.StringVar(value="…")
     result_var = tk.StringVar(value="")
     streak_var = tk.StringVar(value="")
     next_var = tk.StringVar(value="")
@@ -539,6 +551,12 @@ def build_ui():
             result_var.set("上次：%s（%s）" % (STATE["last_msg"], STATE.get("last_run", "")))
         else:
             result_var.set("")
+        _kind, _txt, _color = login_snapshot_state()
+        login_var.set("登录状态：" + _txt)
+        try:
+            login_label.config(foreground=_color)
+        except Exception:
+            pass
         streak_var.set("连续签到 %s 天" % STATE.get("streak", 0))
         nxt = next_run_at().strftime("%m-%d %H:%M")
         next_var.set("下次执行窗口：%s" % nxt)
@@ -612,6 +630,8 @@ def build_ui():
     info = tk.LabelFrame(frame, text="状态", font=("Microsoft YaHei", 10), padx=8, pady=6)
     info.pack(fill="x", pady=(0, 10))
     tk.Label(info, textvariable=result_var, font=("Microsoft YaHei", 10), wraplength=350).pack(anchor="w")
+    login_label = tk.Label(info, textvariable=login_var, font=("Microsoft YaHei", 10, "bold"))
+    login_label.pack(anchor="w")
     tk.Label(info, textvariable=streak_var, font=("Microsoft YaHei", 10)).pack(anchor="w")
     tk.Label(info, textvariable=next_var, font=("Microsoft YaHei", 10)).pack(anchor="w")
 
@@ -627,6 +647,7 @@ def build_ui():
     tk.Button(frame, text="打开数据/日志目录", fg="gray", bd=0, command=open_log).pack(anchor="e", pady=(12, 0))
 
     refresh_state()
+    status_var.set("当前：" + login_snapshot_state()[1] + "。流程：登录 → 启动后台调度")
     pump()
     return root
 
