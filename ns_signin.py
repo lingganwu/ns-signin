@@ -16,7 +16,7 @@ from datetime import datetime, timedelta
 
 IS_WIN = sys.platform.startswith("win")
 APP_NAME = "NS签到助手"
-VERSION = "1.1.2"
+VERSION = "1.2.0"
 SITE = "https://www.nodeseek.com"
 API_PATH = "/api/attendance"
 
@@ -44,6 +44,8 @@ DEFAULTS = {
     "browser_exe": "",
     "enabled": True,
     "headed_fallback": True,
+    "close_action": "tray",      #右上角×：tray=最小化到托盘 / exit=直接退出
+    "auto_start": True,          # 程序启动即自动开启后台调度
 }
 
 def log(msg):
@@ -332,6 +334,8 @@ def mark_done(kind, msg):
     STATE["last_result"] = kind
     STATE["last_msg"] = msg
     if kind in ("ok", "already"):
+        if kind == "already" and int(STATE.get("streak", 0)) == 0:
+            STATE["streak"] = 1
         if kind == "ok":
             if STATE.get("last_date") == yesterday_str():
                 STATE["streak"] = int(STATE.get("streak", 0)) + 1
@@ -503,12 +507,119 @@ def fmt_dur(sec):
 
 
 # ===================== Tkinter 界面 =====================
+RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+
+def autostart_get():
+    if not IS_WIN:
+        return False
+    try:
+        import winreg
+        k = winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY)
+        v, _t = winreg.QueryValueEx(k, "NSSignIn")
+        winreg.CloseKey(k)
+        return bool(v)
+    except Exception:
+        return False
+
+def autostart_set(on):
+    """返回 None=成功，否则错误信息。"""
+    if not IS_WIN:
+        return "开机自启仅支持 Windows"
+    try:
+        import winreg
+        k = winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE)
+        if getattr(sys, "frozen", False):
+            cmd = '"%s"' % sys.executable
+        else:
+            cmd = '\"%s\" \"%s\"' % (sys.executable, os.path.abspath(__file__))
+        if on:
+            winreg.SetValueEx(k, "NSSignIn", 0, winreg.REG_SZ, cmd)
+        else:
+            try:
+                winreg.DeleteValue(k, "NSSignIn")
+            except FileNotFoundError:
+                pass
+        winreg.CloseKey(k)
+        return None
+    except Exception as e:
+        return str(e)
+
+def build_settings_dialog(parent, on_saved):
+    """设置面板：时间窗、自动签到开关、×行为、开机自启等。"""
+    import tkinter as tk
+    from tkinter import messagebox
+    top = tk.Toplevel(parent)
+    top.title("设置")
+    top.geometry("380x360")
+    top.resizable(False, False)
+    top.transient(parent)
+    top.grab_set()
+
+    v_start = tk.StringVar(value=CONFIG.get("start", "08:00"))
+    v_end = tk.StringVar(value=CONFIG.get("end", "12:00"))
+    v_enabled = tk.BooleanVar(value=bool(CONFIG.get("enabled", True)))
+    v_sched = tk.BooleanVar(value=bool(CONFIG.get("auto_start", True)))
+    v_close = tk.StringVar(value=CONFIG.get("close_action", "tray"))
+    v_random = tk.BooleanVar(value=bool(CONFIG.get("random_mode", True)))
+    v_boot = tk.BooleanVar(value=autostart_get())
+
+    f = tk.Frame(top, padx=16, pady=10)
+    f.pack(fill="both", expand=True)
+    F = ("Microsoft YaHei", 10)
+
+    r0 = tk.Frame(f); r0.pack(fill="x", pady=2)
+    tk.Label(r0, text="每日签到时间窗", font=F).pack(side="left")
+    tk.Entry(r0, textvariable=v_start, width=6, justify="center").pack(side="left", padx=(8, 2))
+    tk.Label(r0, text="—", font=F).pack(side="left")
+    tk.Entry(r0, textvariable=v_end, width=6, justify="center").pack(side="left", padx=(2, 8))
+    tk.Label(r0, text="窗口内随机执行", fg="gray", font=F).pack(side="left")
+
+    tk.Checkbutton(f, text="启用每日自动签到", variable=v_enabled, font=F).pack(anchor="w", pady=(6, 0))
+    tk.Checkbutton(f, text="程序启动时自动开启后台调度", variable=v_sched, font=F).pack(anchor="w")
+    tk.Checkbutton(f, text="随机鸡腿（0~10），不选为固定", variable=v_random, font=F).pack(anchor="w")
+
+    box = tk.LabelFrame(f, text="点击右上角 × 时", font=F, padx=8, pady=2)
+    box.pack(fill="x", pady=8)
+    tk.Radiobutton(box, text="最小化到托盘（后台继续签到）", variable=v_close, value="tray", font=F).pack(anchor="w")
+    tk.Radiobutton(box, text="直接退出程序", variable=v_close, value="exit", font=F).pack(anchor="w")
+
+    tk.Checkbutton(f, text="开机自动运行", variable=v_boot, font=F).pack(anchor="w", pady=(4, 0))
+
+    def save():
+        s, e = hhmm(v_start.get(), ""), hhmm(v_end.get(), "")
+        if not s or not e:
+            messagebox.showwarning("设置", "时间格式应为 HH:MM，例如 08:30", parent=top)
+            return
+        if (int(s[:2]) * 60 + int(s[3:])) >= (int(e[:2]) * 60 + int(e[3:])):
+            e = "%02d:%02d" % (min(23, int(s[:2]) + 1), int(s[3:]))
+        CONFIG["start"], CONFIG["end"] = s, e
+        CONFIG["enabled"] = bool(v_enabled.get())
+        CONFIG["auto_start"] = bool(v_sched.get())
+        CONFIG["close_action"] = v_close.get()
+        CONFIG["random_mode"] = bool(v_random.get())
+        err = None
+        if v_boot.get() != autostart_get():
+            err = autostart_set(bool(v_boot.get()))
+        save_json(CONFIG_FILE, CONFIG)
+        if err:
+            messagebox.showwarning("设置", "其余已保存，开机自启设置失败：%s" % err, parent=top)
+        top.destroy()
+        on_saved()
+
+    btns = tk.Frame(f)
+    btns.pack(pady=(12, 0))
+    tk.Button(btns, text="保存", width=10, command=save).pack(side="left", padx=6)
+    tk.Button(btns, text="取消", width=10, command=top.destroy).pack(side="left", padx=6)
+
 def build_ui():
     import queue
     import tkinter as tk
     from tkinter import ttk, messagebox
 
     msg_q = queue.Queue()
+    ui_q = queue.Queue()          # 托盘线程 → 主线程 的指令
+    tray = {"icon": None}
+    sched = {"thread": None}
     root = tk.Tk()
     root.title("%s v%s" % (APP_NAME, VERSION))
     root.geometry("400x470")
@@ -529,14 +640,77 @@ def build_ui():
         """任意线程可调用的状态更新入口。"""
         msg_q.put((kind, msg))
 
+    def real_quit():
+        try:
+            if tray["icon"]:
+                tray["icon"].stop()
+        except Exception:
+            pass
+        root.quit()
+        root.destroy()
+
+    def minimize_to_tray():
+        root.withdraw()
+        if tray["icon"] is None and not start_tray():
+            root.deiconify()
+            status_var.set("托盘不可用，已改为最小化到任务栏")
+            return
+        try:
+            tray["icon"].notify("已最小化到托盘，双击图标恢复", APP_NAME)
+        except Exception:
+            pass
+
+    def start_tray():
+        try:
+            import pystray
+            from PIL import Image, ImageDraw
+        except Exception as e:
+            log("托盘组件缺失: %s" % e)
+            return False
+        try:
+            img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+            d = ImageDraw.Draw(img)
+            d.ellipse([4, 4, 60, 60], fill=(214, 122, 34, 255))
+            try:
+                d.text((19, 22), "NS", fill=(255, 255, 255, 255))
+            except Exception:
+                pass
+            menu = pystray.Menu(
+                pystray.MenuItem("显示主窗口", lambda i, it: ui_q.put(("show",))),
+                pystray.MenuItem("立即签到", lambda i, it: ui_q.put(("check",))),
+                pystray.MenuItem("退出", lambda i, it: ui_q.put(("quit",))),
+            )
+            ic = pystray.Icon("NSSignIn", img, APP_NAME, menu)
+            threading.Thread(target=ic.run, daemon=True).start()
+            tray["icon"] = ic
+            return True
+        except Exception as e:
+            log("托盘启动失败: %s" % e)
+            return False
+
     def pump():
         try:
             while True:
+                cmd = ui_q.get_nowait()[0]
+                if cmd == "show":
+                    root.deiconify()
+                    root.lift()
+                    root.focus_force()
+                elif cmd == "check":
+                    root.deiconify()
+                    do_check()
+                elif cmd == "quit":
+                    real_quit()
+                    return
+        except queue.Empty:
+            pass
+        try:
+            while True:
                 kind, msg = msg_q.get_nowait()
-                colors = {"ok": "green", "fail": "red", "needlogin": "red",
-                          "retry": "orange", "waiting": "blue", "running": "blue",
-                          "login_open": "purple", "login_ok": "green",
-                          "disabled": "gray", "try": "gray40"}
+                colors = {"ok": "#1a7f37", "already": "#1a7f37", "fail": "#c00000",
+                          "needlogin": "#c00000", "login_ok": "#1a7f37",
+                          "retry": "#b45309", "waiting": "#1d4ed8", "running": "#1d4ed8",
+                          "login_open": "#7c3aed", "disabled": "gray", "try": "gray40"}
                 status_var.set(msg)
                 status_label.config(foreground=colors.get(kind, "black"))
                 refresh_state()
@@ -604,8 +778,12 @@ def build_ui():
         threading.Thread(target=run, daemon=True).start()
 
     def start_scheduler():
-        emit("running", "后台调度已启动，每天自动签到（本程序需保持运行）")
-        Scheduler(emit).start()
+        if sched["thread"] is not None and sched["thread"].is_alive():
+            emit("waiting", "后台调度已在运行中")
+            return
+        emit("running", "后台调度已启动，每天自动签到")
+        sched["thread"] = Scheduler(emit)
+        sched["thread"].start()
 
     def open_log():
         try:
@@ -637,16 +815,58 @@ def build_ui():
 
     btns = tk.Frame(frame)
     btns.pack(fill="x", pady=(6, 0))
-    state["btn"]["login"] = tk.Button(btns, text="登录/更新登录态", width=14, command=do_login)
+    state["btn"]["login"] = tk.Button(btns, text="① 登录/更新登录态", width=16, command=do_login)
     state["btn"]["login"].grid(row=0, column=0, padx=(0, 6))
-    state["btn"]["check"] = tk.Button(btns, text="立即签到", width=12, command=do_check)
+    state["btn"]["check"] = tk.Button(btns, text="② 立即签到", width=13, command=do_check)
     state["btn"]["check"].grid(row=0, column=1, padx=6)
-    state["btn"]["sched"] = tk.Button(btns, text="启动后台调度", width=14, command=start_scheduler)
+    state["btn"]["sched"] = tk.Button(btns, text="③ 启动后台调度", width=16, command=start_scheduler)
     state["btn"]["sched"].grid(row=0, column=2, padx=(6, 0))
 
-    tk.Button(frame, text="打开数据/日志目录", fg="gray", bd=0, command=open_log).pack(anchor="e", pady=(12, 0))
+    def open_settings():
+        build_settings_dialog(root, lambda: (refresh_state(),
+                                             emit("waiting", "设置已保存")))
+
+    btns2 = tk.Frame(frame)
+    btns2.pack(fill="x", pady=(6, 0))
+    b_set = tk.Button(btns2, text="⚙ 设置", width=10, command=open_settings)
+    b_set.pack(side="left")
+    tk.Button(btns2, text="打开数据/日志目录", fg="gray", bd=0, command=open_log).pack(side="right")
+
+    tk.Label(frame, text="提示：首次使用按 ①→③；最小化到托盘后仍会自动签到",
+             fg="gray40", font=("Microsoft YaHei", 9)).pack(anchor="w", pady=(8, 0))
+
+    def tip(widget, text):
+        holder = {"w": None}
+        def enter(_e):
+            t = tk.Toplevel(widget)
+            t.wm_overrideredirect(True)
+            tk.Label(t, text=text, background="#ffffe1", relief="solid", bd=1,
+                     font=("Microsoft YaHei", 9)).pack()
+            t.wm_geometry("+%d+%d" % (widget.winfo_rootx() + 12,
+                                      widget.winfo_rooty() + widget.winfo_height() + 6))
+            holder["w"] = t
+        def leave(_e):
+            if holder["w"]:
+                holder["w"].destroy()
+                holder["w"] = None
+        widget.bind("<Enter>", enter)
+        widget.bind("<Leave>", leave)
+
+    tip(state["btn"]["login"], "弹出真实浏览器窗口登录 NS\n（含人机验证，成功后自动关闭并保存登录态）")
+    tip(state["btn"]["check"], "马上尝试签到一次\n用于验证登录态是否正常")
+    tip(state["btn"]["sched"], "开启后按设置的时间窗每天自动签到\n（本程序/托盘需保持运行，可配合开机自启）")
+    tip(b_set, "签到时间窗、自动签到开关、\n关闭×的行为、开机自启")
+
+    def on_close():
+        if CONFIG.get("close_action", "tray") == "exit":
+            real_quit()
+        else:
+            minimize_to_tray()
+    root.protocol("WM_DELETE_WINDOW", on_close)
 
     refresh_state()
+    if CONFIG.get("auto_start", True) and CONFIG.get("enabled", True):
+        root.after(1200, start_scheduler)
     status_var.set("当前：" + login_snapshot_state()[1] + "。流程：登录 → 启动后台调度")
     pump()
     return root

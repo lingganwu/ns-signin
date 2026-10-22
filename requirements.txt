@@ -1,2 +1,4 @@
 playwright>=1.40
+pystray>=0.19
+pillow>=10.0
 pyinstaller>=6.0

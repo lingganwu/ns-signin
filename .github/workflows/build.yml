@@ -20,7 +20,7 @@ jobs:
       - name: Install deps
         run: |
           pip install --upgrade pip
-          pip install playwright pyinstaller
+          pip install -r requirements.txt
           playwright install chromium
 
       - name: Build EXE
