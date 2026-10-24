@@ -128,12 +128,33 @@ def main():
     assert res["kind"] in ("ok", "already"), res
     assert ns.STATE["last_date"] == ns.today_str(), ns.STATE
 
-    # 5) 调度器随机时刻合理性
+    # 5) 排期逻辑
+    from datetime import timedelta
     now = ns.datetime.now()
-    for _ in range(20):
-        nra = ns.next_run_at(now)
-        assert nra > now or nra.day != now.day, nra
-    print("T5 随机时刻 OK")
+    lo, hi = ns._window_bounds(now)
+    for _ in range(30):
+        nra = ns.next_run_at(now, catchup=True)
+        assert nra >= now, (npc := str(nra))
+        assert nra <= hi or nra.day > now.day, nra
+    # 窗口已过 + 今天没签 → 必须立刻补签，不能再拖到明天
+    late = hi + timedelta(minutes=1)
+    assert ns.next_run_at(late, catchup=True) == late, "补签失效"
+    assert ns.next_run_at(late, catchup=False) > late, "非补签应排到以后"
+    assert ns.next_window_start(late).date() == (late + timedelta(days=1)).date()
+    print("T5 排期/补签 OK")
+
+    # 6) 尝试序列：隐藏有头在可见有头之前，且不会真的抢焦点
+    ns.CONFIG["headless_tries"] = 1
+    ns.CONFIG["headed_fallback"] = True
+    ns.CONFIG["hidden_headed"] = True
+    seq = ns.build_attempts()
+    assert seq[0][1] is True, seq
+    assert seq[-1] == ("可见浏览器", False, False), seq
+    assert ("后台浏览器", False, True) in seq, seq
+    ns.CONFIG["hidden_headed"] = False
+    assert ("后台浏览器", False, True) not in ns.build_attempts()
+    ns.CONFIG["hidden_headed"] = True
+    print("T6 尝试序列 OK:", [a[0] for a in ns.build_attempts()])
 
     srv.shutdown()
     print("ALL TESTS PASSED")

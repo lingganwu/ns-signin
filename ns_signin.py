@@ -16,7 +16,7 @@ from datetime import datetime, timedelta
 
 IS_WIN = sys.platform.startswith("win")
 APP_NAME = "NS签到助手"
-VERSION = "1.2.0"
+VERSION = "1.2.1"
 SITE = "https://www.nodeseek.com"
 API_PATH = "/api/attendance"
 
@@ -44,8 +44,12 @@ DEFAULTS = {
     "browser_exe": "",
     "enabled": True,
     "headed_fallback": True,
-    "close_action": "tray",      #右上角×：tray=最小化到托盘 / exit=直接退出
+    "close_action": "tray",      # 右上角×：tray=最小化到托盘 / exit=直接退出
     "auto_start": True,          # 程序启动即自动开启后台调度
+    "hidden_headed": True,       # 有头兜底窗口挪到屏幕外：能过 Cloudflare 又不抢焦点
+    "headless_tries": 1,         # 无头尝试次数，用完直接换真实浏览器
+    "retry_minutes": 30,         # 一次流程失败后隔多久再试
+    "max_attempts": 6,           # 当天最多重试次数，超过就等明天窗口
 }
 
 def log(msg):
@@ -93,6 +97,7 @@ STATE = load_json(STATE_FILE, {
     "last_run": "",
     "next_run": "",
     "total_ok": 0,
+    "attempts_today": 0,
 })
 
 def today_str(ts=None):
@@ -116,22 +121,48 @@ def parse_hhmm(text, fallback):
     h, mi = s.split(":")
     return int(h), int(mi)
 
-def next_run_at(now=None):
-    """在 [start, end] 窗口内取一个随机时刻；今天已过点则排到明天。"""
-    now = now or datetime.now()
+def _window_bounds(now):
+    """今天的 [lo, hi] 时间窗。"""
     sh, sm = parse_hhmm(CONFIG.get("start", "08:00"), "08:00")
     eh, em = parse_hhmm(CONFIG.get("end", "12:00"), "12:00")
     lo = now.replace(hour=sh, minute=sm, second=0, microsecond=0)
     hi = now.replace(hour=eh, minute=em, second=0, microsecond=0)
     if hi <= lo:
         hi = lo + timedelta(hours=1)
-    if now >= hi:                       # 今天窗口已过 → 明天
-        lo = lo + timedelta(days=1)
-        hi = hi + timedelta(days=1)
-    elif now > lo:                      # 窗口进行中但已过起点 → 从"现在+1分钟"起随机
-        lo = now + timedelta(minutes=1)
+    return lo, hi
+
+
+def _rand_in(lo, hi):
     delta = int((hi - lo).total_seconds())
     return lo + timedelta(seconds=random.randint(0, max(60, delta)))
+
+
+def next_run_at(now=None, catchup=True):
+    """下一次签到时刻。
+    catchup=True 时：今天窗口已过而今天还没签 → 立刻补签（返回 now），不再白等一整天。
+    """
+    now = now or datetime.now()
+    lo, hi = _window_bounds(now)
+    if now >= hi:
+        if catchup:
+            return now
+        return _rand_in(lo + timedelta(days=1), hi + timedelta(days=1))
+    if now > lo:                        # 窗口进行中但已过起点 → 从"现在+1分钟"起随机
+        lo = now + timedelta(minutes=1)
+    return _rand_in(lo, hi)
+
+
+def next_window_start(now=None):
+    """下一个还没用完的窗口起点（今天已签完时用）。"""
+    now = now or datetime.now()
+    lo, hi = _window_bounds(now)
+    return lo if now < hi else lo + timedelta(days=1)
+
+
+def tomorrow_slot(now=None):
+    now = now or datetime.now()
+    lo, hi = _window_bounds(now)
+    return _rand_in(lo + timedelta(days=1), hi + timedelta(days=1))
 
 
 # ===================== 浏览器 / 签到核心 =====================
@@ -212,7 +243,7 @@ def parse_checkin(status, text):
             return "retry", "被 Cloudflare 拦住"
         return "needlogin", "登录已失效，需要重新登录"
     if not data:
-        if re.search(r"just a moment|cf_chl|attention required|verify you are a human", "", re.I):
+        if re.search(r"just a moment|cf_chl|attention required|verify you are a human", text or "", re.I):
             return "retry", "被 Cloudflare 拦住"
         if status == 0:
             return "retry", "请求未送达"
@@ -221,15 +252,21 @@ def parse_checkin(status, text):
         return "fail", "接口 404，站点签到接口可能变了"
     return "fail", str((data or {}).get("message") or ("HTTP %s" % status))
 
-def make_context(pw, headless=True):
+def make_context(pw, headless=True, hidden=False):
     """启动持久化浏览器上下文。
     优先级：config 里指定的浏览器可执行文件 > 系统 Edge/Chrome > Playwright 自带 Chromium。
+    hidden=True 表示有头但窗口挪到屏幕外（真浏览器指纹，且不抢焦点）。
     """
+    args = ["--disable-blink-features=AutomationControlled",
+            "--disable-features=Translate"]
+    if not headless and hidden:
+        # 有头但窗口移到屏幕外：Cloudflare 看到的是真浏览器，用户不会被抢焦点
+        args += ["--window-position=-32000,-32000", "--window-size=1280,800"]
     kw = {
         "user_data_dir": PROFILE_DIR,
         "headless": headless,
         "viewport": None,
-        "args": ["--disable-blink-features=AutomationControlled"],
+        "args": args,
     }
     if CONFIG.get("proxy"):
         kw["proxy"] = {"server": CONFIG["proxy"]}
@@ -290,7 +327,7 @@ def login_snapshot_state():
         return "partial", "已存 cookie 但缺 session，建议重新登录", "orange"
     return "none", "未登录", "gray"
 
-def do_checkin(headless=True):
+def do_checkin(headless=True, hidden=False):
     """执行一次签到。返回 dict(kind, msg)。kind ∈ ok/already/needlogin/retry/fail"""
     try:
         from playwright.sync_api import sync_playwright
@@ -299,7 +336,7 @@ def do_checkin(headless=True):
     rv = bool(CONFIG.get("random_mode", True))
     try:
         with sync_playwright() as pw:
-            ctx, ch = make_context(pw, headless=headless)
+            ctx, ch = make_context(pw, headless=headless, hidden=hidden)
             try:
                 inject_cookies(ctx)
                 page = ctx.new_page()
@@ -344,13 +381,26 @@ def mark_done(kind, msg):
             STATE["total_ok"] = int(STATE.get("total_ok", 0)) + 1
         STATE["last_date"] = today_str()
         STATE["need_login"] = False
+        STATE["attempts_today"] = 0
+        STATE["attempt_date"] = today_str()
     elif kind == "needlogin":
         STATE["need_login"] = True
     save_json(STATE_FILE, STATE)
     log("结果 %s: %s" % (kind, msg))
 
+def build_attempts():
+    """尝试序列：无头试探 → 隐身有头（屏幕外）→ 可见有头兜底。"""
+    tries = max(1, int(CONFIG.get("headless_tries", 1) or 1))
+    attempts = [("无头浏览器", True, False)] * tries
+    if CONFIG.get("headed_fallback", True):
+        if CONFIG.get("hidden_headed", True):
+            attempts.append(("后台浏览器", False, True))
+        attempts.append(("可见浏览器", False, False))
+    return attempts
+
+
 def run_checkin_pipeline(ui_cb=None, force=False):
-    """完整签到流程：headless 两次 → 可选 headed 一次。"""
+    """完整签到流程：无头 → 隐身有头 → 可见有头。"""
     def cb(kind, msg):
         log("pipeline: %s %s" % (kind, msg))
         if ui_cb:
@@ -363,15 +413,16 @@ def run_checkin_pipeline(ui_cb=None, force=False):
         cb("already", "今天已签到（连续 %s 天）" % STATE.get("streak", 0))
         return {"kind": "already", "msg": "今天已签到"}
 
-    attempts = [("headless", True), ("headless", True)]
-    if CONFIG.get("headed_fallback", True):
-        attempts.append(("headed", False))
+    attempts = build_attempts()
+    total = len(attempts)
 
     last = {"kind": "retry", "msg": "未执行"}
-    for name, headless in attempts:
-        r = do_checkin(headless=headless)
+    for idx, (name, headless, hidden) in enumerate(attempts, 1):
+        cb("try", "第 %d/%d 次尝试：%s…" % (idx, total, name))
+        r = do_checkin(headless=headless, hidden=hidden)
         last = r
-        cb("try", "[%s] %s: %s" % (name, r.get("kind"), r.get("msg")))
+        if r["kind"] not in ("ok", "already"):
+            cb("try", "第 %d/%d 次（%s）未成功：%s" % (idx, total, name, r.get("msg")))
         if r["kind"] in ("ok", "already"):
             mark_done(r["kind"], r["msg"])
             cb(r["kind"], r["msg"])
@@ -465,6 +516,12 @@ class Scheduler(threading.Thread):
             self._wake.wait(min(remain, 5))
         self._wake.clear()
 
+    def _reset_day_counters(self, now):
+        if STATE.get("attempt_date") != today_str(now):
+            STATE["attempt_date"] = today_str(now)
+            STATE["attempts_today"] = 0
+            save_json(STATE_FILE, STATE)
+
     def run(self):
         self._emit("waiting", "调度器已启动")
         while not self._stop.is_set():
@@ -473,30 +530,67 @@ class Scheduler(threading.Thread):
                 self._wait(60)
                 continue
             now = datetime.now()
-            if STATE.get("last_date") == today_str():
-                self._emit("waiting", "今日已完成（连续 %s 天），明早 %s 前自动补签" % (
-                    STATE.get("streak", 0), CONFIG.get("start", "08:00")))
-                # 直接睡到窗口结束
+            self._reset_day_counters(now)
+
+            if STATE.get("last_date") == today_str(now):
+                nxt = next_window_start(now)
+                self.next_at = nxt
+                self._emit("waiting", "今日已完成（连续 %s 天），下次 %s" % (
+                    STATE.get("streak", 0), nxt.strftime("%m-%d %H:%M")))
                 self._wait(300)
                 continue
+
             if STATE.get("need_login"):
                 self._emit("needlogin", "需要重新登录，签到暂停中（每 5 分钟检查）")
                 self._wait(300)
                 continue
-            nxt = next_run_at(now)
+
+            tries = int(STATE.get("attempts_today", 0) or 0)
+            cap = max(1, int(CONFIG.get("max_attempts", 6) or 6))
+            if tries >= cap:
+                nxt = tomorrow_slot(now)
+                self.next_at = nxt
+                self._emit("retry", "今天已试 %d 次没成功，明天 %s 再试" % (
+                    tries, nxt.strftime("%m-%d %H:%M")))
+                self._wait(min(max(0, int((nxt - now).total_seconds())), 300))
+                continue
+
+            # 窗口内随机时刻；窗口已过而今天没签 → 立刻补签
+            nxt = next_run_at(now, catchup=True)
+            self.next_at = nxt
             wait = max(0, int((nxt - now).total_seconds()))
             if wait > 0:
-                self._emit("waiting", "下次签到 %s（还有 %s）" % (nxt.strftime("%m-%d %H:%M"), fmt_dur(wait)))
+                self._emit("waiting", "下次签到 %s（还有 %s）" % (
+                    nxt.strftime("%m-%d %H:%M"), fmt_dur(wait)))
                 self._wait(min(wait, 300))
                 continue
-            # 到点了
-            self._emit("running", "开始签到…")
+
+            STATE["attempts_today"] = tries + 1
+            save_json(STATE_FILE, STATE)
+            self._emit("running", "开始签到…（今天第 %d 轮）" % (tries + 1))
             try:
-                run_checkin_pipeline(self._emit, force=False)
+                res = run_checkin_pipeline(self._emit, force=False)
             except Exception as e:
                 log("pipeline 异常: %s" % e)
                 self._emit("fail", "pipeline 异常：%s" % e)
-            self._wait(120)
+                res = {"kind": "fail", "msg": str(e)}
+
+            if (res or {}).get("kind") in ("ok", "already"):
+                self._wait(300)
+                continue
+            gap = max(1, int(CONFIG.get("retry_minutes", 30) or 30)) * 60
+            left = max(0, cap - (tries + 1))
+            if left:
+                self._emit("retry", "这轮没成功，%d 分钟后重试（今天还剩 %d 次机会）" % (
+                    CONFIG.get("retry_minutes", 30), left))
+            self._wait(min(gap, 300))
+            if left:
+                # 等待剩余间隔（_wait 最多睡 300 秒，用循环补满）
+                remain = gap - 300
+                while remain > 0 and not self._stop.is_set():
+                    step = min(remain, 300)
+                    self._wait(step)
+                    remain -= step
 
 def fmt_dur(sec):
     sec = int(sec)
@@ -561,6 +655,8 @@ def build_settings_dialog(parent, on_saved):
     v_sched = tk.BooleanVar(value=bool(CONFIG.get("auto_start", True)))
     v_close = tk.StringVar(value=CONFIG.get("close_action", "tray"))
     v_random = tk.BooleanVar(value=bool(CONFIG.get("random_mode", True)))
+    v_hidden = tk.BooleanVar(value=bool(CONFIG.get("hidden_headed", True)))
+    v_retry = tk.StringVar(value=str(CONFIG.get("retry_minutes", 30)))
     v_boot = tk.BooleanVar(value=autostart_get())
 
     f = tk.Frame(top, padx=16, pady=10)
@@ -577,6 +673,11 @@ def build_settings_dialog(parent, on_saved):
     tk.Checkbutton(f, text="启用每日自动签到", variable=v_enabled, font=F).pack(anchor="w", pady=(6, 0))
     tk.Checkbutton(f, text="程序启动时自动开启后台调度", variable=v_sched, font=F).pack(anchor="w")
     tk.Checkbutton(f, text="随机鸡腿（0~10），不选为固定", variable=v_random, font=F).pack(anchor="w")
+    tk.Checkbutton(f, text="后台自动签到时隐藏浏览器窗口（推荐）", variable=v_hidden, font=F).pack(anchor="w")
+    row2 = tk.Frame(f); row2.pack(fill="x", pady=2)
+    tk.Label(row2, text="失败后间隔", font=F).pack(side="left")
+    tk.Entry(row2, textvariable=v_retry, width=5, justify="center").pack(side="left", padx=4)
+    tk.Label(row2, text="分钟重试一次", font=F).pack(side="left")
 
     box = tk.LabelFrame(f, text="点击右上角 × 时", font=F, padx=8, pady=2)
     box.pack(fill="x", pady=8)
@@ -597,6 +698,11 @@ def build_settings_dialog(parent, on_saved):
         CONFIG["auto_start"] = bool(v_sched.get())
         CONFIG["close_action"] = v_close.get()
         CONFIG["random_mode"] = bool(v_random.get())
+        CONFIG["hidden_headed"] = bool(v_hidden.get())
+        try:
+            CONFIG["retry_minutes"] = min(720, max(1, int(v_retry.get())))
+        except Exception:
+            pass
         err = None
         if v_boot.get() != autostart_get():
             err = autostart_set(bool(v_boot.get()))
@@ -732,8 +838,17 @@ def build_ui():
         except Exception:
             pass
         streak_var.set("连续签到 %s 天" % STATE.get("streak", 0))
-        nxt = next_run_at().strftime("%m-%d %H:%M")
-        next_var.set("下次执行窗口：%s" % nxt)
+        try:
+            th = sched.get("thread")
+        except Exception:
+            th = None
+        if th is not None and getattr(th, "next_at", None):
+            nxt = th.next_at
+        elif STATE.get("last_date") == today_str():
+            nxt = next_window_start()
+        else:
+            nxt = next_run_at()
+        next_var.set("下次签到：%s" % nxt.strftime("%m-%d %H:%M"))
 
     def set_buttons(kind):
         busy = kind in ("running", "login_open")
