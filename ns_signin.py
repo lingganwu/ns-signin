@@ -16,7 +16,7 @@ from datetime import datetime, timedelta
 
 IS_WIN = sys.platform.startswith("win")
 APP_NAME = "NS签到助手"
-VERSION = "1.2.2"
+VERSION = "1.2.3"
 SITE = "https://www.nodeseek.com"
 API_PATH = "/api/attendance"
 
@@ -252,6 +252,28 @@ def parse_checkin(status, text):
         return "fail", "接口 404，站点签到接口可能变了"
     return "fail", str((data or {}).get("message") or ("HTTP %s" % status))
 
+def detect_browser_candidates():
+    """扫描本机常见安装位置，返回存在的浏览器可执行文件路径（Edge 优先）。"""
+    cands = []
+    if IS_WIN:
+        bases = [os.getenv("PROGRAMFILES(X86)", r"C:\Program Files (x86)"),
+                 os.getenv("PROGRAMW6432") or os.getenv("PROGRAMFILES", r"C:\Program Files"),
+                 os.getenv("LOCALAPPDATA", "")]
+        names = [(r"Microsoft\Edge\Application\msedge.exe", 0),
+                 (r"Google\Chrome\Application\chrome.exe", 1),
+                 (r"Chromium\Application\chrome.exe", 2)]
+        pairs = sorted(names, key=lambda x: x[1])
+        for base in bases:
+            if not base:
+                continue
+            for rel, _w in pairs:
+                cands.append(os.path.join(base, rel))
+    else:
+        cands += ["/usr/bin/google-chrome", "/usr/bin/microsoft-edge", "/usr/bin/chromium",
+                  "/usr/bin/chromium-browser", "/snap/bin/chromium"]
+    return [c for c in cands if c]
+
+
 def make_context(pw, headless=True, hidden=False):
     """启动持久化浏览器上下文。
     优先级：config 里指定的浏览器可执行文件 > 系统 Edge/Chrome > Playwright 自带 Chromium。
@@ -270,19 +292,38 @@ def make_context(pw, headless=True, hidden=False):
     }
     if CONFIG.get("proxy"):
         kw["proxy"] = {"server": CONFIG["proxy"]}
-    exe = CONFIG.get("browser_exe", "")
-    if exe and os.path.exists(exe):
-        return pw.chromium.launch_persistent_context(executable_path=exe, **kw), "custom"
-    last = None
-    for ch in ("msedge", "chrome"):
+    tried = []
+    def attempt(fn, label):
         try:
-            return pw.chromium.launch_persistent_context(channel=ch, **kw), ch
+            return fn(), label
         except Exception as e:
-            last = e
-    try:
-        return pw.chromium.launch_persistent_context(**kw), "chromium"
-    except Exception as e:
-        raise RuntimeError("浏览器启动失败（找不到 Edge/Chrome）：%s" % last)
+            msg = str(e).replace("\n", " ")[:180]
+            tried.append("%s → %s" % (label, msg))
+            log("浏览器启动失败[%s]: %s" % (label, msg))
+            return None
+
+    want = (CONFIG.get("browser_exe") or "").strip()
+    if want and not os.path.exists(want):
+        log("配置里的 browser_exe 不存在，忽略：%s" % want)
+        want = ""
+    cands = ([want] if want else []) + detect_browser_candidates()
+    seen = set()
+    for p in cands:
+        if not p or p.lower() in seen or not os.path.exists(p):
+            continue
+        seen.add(p.lower())
+        got = attempt(lambda p=p: pw.chromium.launch_persistent_context(executable_path=p, **kw),
+                      os.path.basename(p))
+        if got:
+            return got
+    for ch in ("msedge", "chrome"):
+        got = attempt(lambda c=ch: pw.chromium.launch_persistent_context(channel=c, **kw),
+                      "channel:" + ch)
+        if got:
+            return got
+    attempt(lambda: pw.chromium.launch_persistent_context(**kw), "内置chromium")
+    raise RuntimeError("浏览器启动失败，已尝试：%s。请在 ⚙设置 里填写浏览器路径"
+                       % " ｜ ".join(tried))
 
 COOKIES_FILE = os.path.join(DATA_DIR, "cookies.json")
 
@@ -667,7 +708,7 @@ def build_settings_dialog(parent, on_saved):
     from tkinter import messagebox
     top = tk.Toplevel(parent)
     top.title("设置")
-    top.geometry("380x360")
+    top.geometry("400x440")
     top.resizable(False, False)
     top.transient(parent)
     top.grab_set()
@@ -681,10 +722,18 @@ def build_settings_dialog(parent, on_saved):
     v_hidden = tk.BooleanVar(value=bool(CONFIG.get("hidden_headed", True)))
     v_retry = tk.StringVar(value=str(CONFIG.get("retry_minutes", 30)))
     v_boot = tk.BooleanVar(value=autostart_get())
+    v_exe = tk.StringVar(value=CONFIG.get("browser_exe", ""))
 
     f = tk.Frame(top, padx=16, pady=10)
     f.pack(fill="both", expand=True)
     F = ("Microsoft YaHei", 10)
+
+    def pick_exe():
+        from tkinter import filedialog
+        p = filedialog.askopenfilename(title="选择浏览器程序", parent=top,
+                                       filetypes=[("可执行文件", "*.exe"), ("所有文件", "*.*")])
+        if p:
+            v_exe.set(p)
 
     r0 = tk.Frame(f); r0.pack(fill="x", pady=2)
     tk.Label(r0, text="每日签到时间窗", font=F).pack(side="left")
@@ -707,6 +756,12 @@ def build_settings_dialog(parent, on_saved):
     tk.Radiobutton(box, text="最小化到托盘（后台继续签到）", variable=v_close, value="tray", font=F).pack(anchor="w")
     tk.Radiobutton(box, text="直接退出程序", variable=v_close, value="exit", font=F).pack(anchor="w")
 
+    row3 = tk.Frame(f); row3.pack(fill="x", pady=2)
+    tk.Label(row3, text="浏览器路径", font=F).pack(side="left")
+    tk.Button(row3, text="浏览…", font=("Microsoft YaHei", 9), command=pick_exe).pack(side="right")
+    tk.Entry(f, textvariable=v_exe, font=("Microsoft YaHei", 9)).pack(fill="x")
+    tk.Label(f, text="留空=自动扫描本机 Edge/Chrome", fg="gray", font=("Microsoft YaHei", 9)).pack(anchor="w")
+
     tk.Checkbutton(f, text="开机自动运行", variable=v_boot, font=F).pack(anchor="w", pady=(4, 0))
 
     def save():
@@ -722,6 +777,11 @@ def build_settings_dialog(parent, on_saved):
         CONFIG["close_action"] = v_close.get()
         CONFIG["random_mode"] = bool(v_random.get())
         CONFIG["hidden_headed"] = bool(v_hidden.get())
+        ex = v_exe.get().strip()
+        if ex and not os.path.exists(ex):
+            messagebox.showwarning("设置", "浏览器路径不存在：%s" % ex, parent=top)
+            return
+        CONFIG["browser_exe"] = ex
         try:
             CONFIG["retry_minutes"] = min(720, max(1, int(v_retry.get())))
         except Exception:

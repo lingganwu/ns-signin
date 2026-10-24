@@ -185,6 +185,31 @@ def main():
     ns.CONFIG["start"], ns.CONFIG["end"] = "08:00", "12:00"
     print("T7 调度器触发 OK（今天第 %d 轮）" % ns.STATE["attempts_today"])
 
+    # 8) 浏览器定位：坏路径必须被跳过并给出可读错误；自动扫描要能顶上来
+    CHROME = ns.CONFIG.get("browser_exe", "")
+    ns.CONFIG["browser_exe"] = r"C:\Users\x\AppData\Local\Google\Chrome\Application\chrome.exe"
+    from playwright.sync_api import sync_playwright as _sp
+    try:
+        with _sp() as pw:
+            ns.make_context(pw, headless=True)
+        raise AssertionError("坏路径竟然启动成功了？")
+    except RuntimeError as e:
+        assert "已尝试" in str(e), str(e)
+        print("T8a 坏路径报错清晰:", str(e)[:70], "...")
+    # 空配置 → 走自动扫描（容器里把真实 chrome 假装成扫描结果）
+    ns.CONFIG["browser_exe"] = ""
+    real_detect = ns.detect_browser_candidates
+    ns.detect_browser_candidates = lambda: [CHROME] if CHROME else []
+    try:
+        with _sp() as pw:
+            ctx2, tag2 = ns.make_context(pw, headless=True)
+            ctx2.close()
+        assert tag2.endswith("chrome"), tag2
+        print("T8b 自动扫描兜底 OK:", tag2)
+    finally:
+        ns.detect_browser_candidates = real_detect
+        ns.CONFIG["browser_exe"] = CHROME
+
     srv.shutdown()
     print("ALL TESTS PASSED")
 
