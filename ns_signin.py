@@ -16,7 +16,7 @@ from datetime import datetime, timedelta
 
 IS_WIN = sys.platform.startswith("win")
 APP_NAME = "NS签到助手"
-VERSION = "1.2.1"
+VERSION = "1.2.2"
 SITE = "https://www.nodeseek.com"
 API_PATH = "/api/attendance"
 
@@ -47,7 +47,7 @@ DEFAULTS = {
     "close_action": "tray",      # 右上角×：tray=最小化到托盘 / exit=直接退出
     "auto_start": True,          # 程序启动即自动开启后台调度
     "hidden_headed": True,       # 有头兜底窗口挪到屏幕外：能过 Cloudflare 又不抢焦点
-    "headless_tries": 1,         # 无头尝试次数，用完直接换真实浏览器
+    "headless_tries": 0,         # 无头探针次数；实测必被 CF 拦，默认 0 直接走隐身有头
     "retry_minutes": 30,         # 一次流程失败后隔多久再试
     "max_attempts": 6,           # 当天最多重试次数，超过就等明天窗口
 }
@@ -389,8 +389,12 @@ def mark_done(kind, msg):
     log("结果 %s: %s" % (kind, msg))
 
 def build_attempts():
-    """尝试序列：无头试探 → 隐身有头（屏幕外）→ 可见有头兜底。"""
-    tries = max(1, int(CONFIG.get("headless_tries", 1) or 1))
+    """尝试序列。实测（用户 1.2.0 日志）：无头 100% 被 Cloudflare 拦，有头 100% 成功，
+    所以默认把隐身有头排第一，无头只作为可选探针（headless_tries=0 即跳过）。"""
+    try:
+        tries = max(0, int(CONFIG.get("headless_tries", 0) or 0))
+    except Exception:
+        tries = 0
     attempts = [("无头浏览器", True, False)] * tries
     if CONFIG.get("headed_fallback", True):
         if CONFIG.get("hidden_headed", True):
@@ -524,73 +528,92 @@ class Scheduler(threading.Thread):
 
     def run(self):
         self._emit("waiting", "调度器已启动")
+        log("调度线程开始运行")
+        self._beat = time.time()
         while not self._stop.is_set():
-            if not CONFIG.get("enabled", True):
-                self._emit("disabled", "定时签到已暂停")
-                self._wait(60)
-                continue
-            now = datetime.now()
-            self._reset_day_counters(now)
+          try:
+            self._tick()
+          except Exception as e:
+            log("调度循环异常: %s\n%s" % (e, traceback.format_exc()))
+            self._emit("fail", "调度异常（线程已续命）：%s" % e)
+            self._wait(60)
+        log("调度线程退出")
 
-            if STATE.get("last_date") == today_str(now):
-                nxt = next_window_start(now)
-                self.next_at = nxt
-                self._emit("waiting", "今日已完成（连续 %s 天），下次 %s" % (
-                    STATE.get("streak", 0), nxt.strftime("%m-%d %H:%M")))
-                self._wait(300)
-                continue
+    def _tick(self):
+        """一轮调度判断。异常由 run() 统一兜底，避免线程静默死亡。"""
+        if time.time() - getattr(self, "_beat", 0) > 1800:
+            self._beat = time.time()
+            log("调度心跳：已登录=%s 今天已签=%s 今天尝试=%s 次 下次=%s" % (
+                bool(load_json(COOKIES_FILE, [])),
+                STATE.get("last_date") == today_str(),
+                STATE.get("attempts_today", 0),
+                self.next_at.strftime("%m-%d %H:%M") if self.next_at else "—"))
+        if not CONFIG.get("enabled", True):
+            self._emit("disabled", "定时签到已暂停")
+            self._wait(60)
+            return
+        now = datetime.now()
+        self._reset_day_counters(now)
 
-            if STATE.get("need_login"):
-                self._emit("needlogin", "需要重新登录，签到暂停中（每 5 分钟检查）")
-                self._wait(300)
-                continue
-
-            tries = int(STATE.get("attempts_today", 0) or 0)
-            cap = max(1, int(CONFIG.get("max_attempts", 6) or 6))
-            if tries >= cap:
-                nxt = tomorrow_slot(now)
-                self.next_at = nxt
-                self._emit("retry", "今天已试 %d 次没成功，明天 %s 再试" % (
-                    tries, nxt.strftime("%m-%d %H:%M")))
-                self._wait(min(max(0, int((nxt - now).total_seconds())), 300))
-                continue
-
-            # 窗口内随机时刻；窗口已过而今天没签 → 立刻补签
-            nxt = next_run_at(now, catchup=True)
+        if STATE.get("last_date") == today_str(now):
+            nxt = next_window_start(now)
             self.next_at = nxt
-            wait = max(0, int((nxt - now).total_seconds()))
-            if wait > 0:
-                self._emit("waiting", "下次签到 %s（还有 %s）" % (
-                    nxt.strftime("%m-%d %H:%M"), fmt_dur(wait)))
-                self._wait(min(wait, 300))
-                continue
+            self._emit("waiting", "今日已完成（连续 %s 天），下次 %s" % (
+                STATE.get("streak", 0), nxt.strftime("%m-%d %H:%M")))
+            self._wait(300)
+            return
 
-            STATE["attempts_today"] = tries + 1
-            save_json(STATE_FILE, STATE)
-            self._emit("running", "开始签到…（今天第 %d 轮）" % (tries + 1))
-            try:
-                res = run_checkin_pipeline(self._emit, force=False)
-            except Exception as e:
-                log("pipeline 异常: %s" % e)
-                self._emit("fail", "pipeline 异常：%s" % e)
-                res = {"kind": "fail", "msg": str(e)}
+        if STATE.get("need_login"):
+            self._emit("needlogin", "需要重新登录，签到暂停中（每 5 分钟检查）")
+            self._wait(300)
+            return
 
-            if (res or {}).get("kind") in ("ok", "already"):
-                self._wait(300)
-                continue
-            gap = max(1, int(CONFIG.get("retry_minutes", 30) or 30)) * 60
-            left = max(0, cap - (tries + 1))
-            if left:
-                self._emit("retry", "这轮没成功，%d 分钟后重试（今天还剩 %d 次机会）" % (
-                    CONFIG.get("retry_minutes", 30), left))
-            self._wait(min(gap, 300))
-            if left:
-                # 等待剩余间隔（_wait 最多睡 300 秒，用循环补满）
-                remain = gap - 300
-                while remain > 0 and not self._stop.is_set():
-                    step = min(remain, 300)
-                    self._wait(step)
-                    remain -= step
+        tries = int(STATE.get("attempts_today", 0) or 0)
+        cap = max(1, int(CONFIG.get("max_attempts", 6) or 6))
+        if tries >= cap:
+            nxt = tomorrow_slot(now)
+            self.next_at = nxt
+            self._emit("retry", "今天已试 %d 次没成功，明天 %s 再试" % (
+                tries, nxt.strftime("%m-%d %H:%M")))
+            self._wait(min(max(0, int((nxt - now).total_seconds())), 300))
+            return
+
+        # 窗口内随机时刻；窗口已过而今天没签 → 立刻补签
+        nxt = next_run_at(now, catchup=True)
+        self.next_at = nxt
+        wait = max(0, int((nxt - now).total_seconds()))
+        if wait > 0:
+            self._emit("waiting", "下次签到 %s（还有 %s）" % (
+                nxt.strftime("%m-%d %H:%M"), fmt_dur(wait)))
+            self._wait(min(wait, 300))
+            return
+
+        STATE["attempts_today"] = tries + 1
+        save_json(STATE_FILE, STATE)
+        self._emit("running", "开始签到…（今天第 %d 轮）" % (tries + 1))
+        try:
+            res = run_checkin_pipeline(self._emit, force=False)
+        except Exception as e:
+            log("pipeline 异常: %s" % e)
+            self._emit("fail", "pipeline 异常：%s" % e)
+            res = {"kind": "fail", "msg": str(e)}
+
+        if (res or {}).get("kind") in ("ok", "already"):
+            self._wait(300)
+            return
+        gap = max(1, int(CONFIG.get("retry_minutes", 30) or 30)) * 60
+        left = max(0, cap - (tries + 1))
+        if left:
+            self._emit("retry", "这轮没成功，%d 分钟后重试（今天还剩 %d 次机会）" % (
+                CONFIG.get("retry_minutes", 30), left))
+        self._wait(min(gap, 300))
+        if left:
+            # 等待剩余间隔（_wait 最多睡 300 秒，用循环补满）
+            remain = gap - 300
+            while remain > 0 and not self._stop.is_set():
+                step = min(remain, 300)
+                self._wait(step)
+                remain -= step
 
 def fmt_dur(sec):
     sec = int(sec)

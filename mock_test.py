@@ -123,7 +123,11 @@ def main():
     logs = []
     def cb(k, m): logs.append((k, m))
     # 注：T2 已在 mock 服务端签到，今天服务端必回 already，所以 pipeline 结果应为 ok/already
+    # 容器无 X server，跑不了有头浏览器 → 这一段只走无头梯子（梯子形状由 T6 静态断言）
+    ns.CONFIG["headless_tries"] = 1
+    ns.CONFIG["headed_fallback"] = False
     res = ns.run_checkin_pipeline(cb, force=True)
+    ns.CONFIG["headed_fallback"] = True
     print("T4 pipeline:", res["kind"], res["msg"])
     assert res["kind"] in ("ok", "already"), res
     assert ns.STATE["last_date"] == ns.today_str(), ns.STATE
@@ -155,6 +159,31 @@ def main():
     assert ("后台浏览器", False, True) not in ns.build_attempts()
     ns.CONFIG["hidden_headed"] = True
     print("T6 尝试序列 OK:", [a[0] for a in ns.build_attempts()])
+
+    # 7) 调度器真的会触发签到（超窗未签 → 当轮立刻执行），且线程不会静默不干活
+    calls = []
+    real_pipeline = ns.run_checkin_pipeline
+    def fake_pipeline(ui_cb=None, force=False):
+        calls.append(1)
+        return {"kind": "ok", "msg": "模拟成功"}
+    ns.run_checkin_pipeline = fake_pipeline
+    ns.CONFIG["start"], ns.CONFIG["end"] = "00:00", "00:01"   # 一定已过窗口
+    ns.STATE["last_date"] = ""
+    ns.STATE["need_login"] = False
+    ns.STATE["attempts_today"] = 0
+    ns.STATE["attempt_date"] = ns.today_str()
+    sc = ns.Scheduler(lambda k, m: None)
+    sc._wait = lambda s: None                                   # 不真睡
+    sc._tick()
+    assert calls == [1], "调度器没有触发签到：%r" % (calls,)
+    assert ns.Scheduler(lambda k, m: None) is not None
+    # 已签到后再 tick，不应重复调用 pipeline
+    ns.STATE["last_date"] = ns.today_str()
+    sc._tick()
+    assert calls == [1], "今日已完成却仍重复签到"
+    ns.run_checkin_pipeline = real_pipeline
+    ns.CONFIG["start"], ns.CONFIG["end"] = "08:00", "12:00"
+    print("T7 调度器触发 OK（今天第 %d 轮）" % ns.STATE["attempts_today"])
 
     srv.shutdown()
     print("ALL TESTS PASSED")
