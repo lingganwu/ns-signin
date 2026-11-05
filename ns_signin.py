@@ -16,7 +16,7 @@ from datetime import datetime, timedelta
 
 IS_WIN = sys.platform.startswith("win")
 APP_NAME = "NS签到助手"
-VERSION = "1.3.3"
+VERSION = "1.3.4"
 SITE = "https://www.nodeseek.com"
 API_PATH = "/api/attendance"
 COMMENT_API = "/api/content/new-comment"
@@ -221,109 +221,55 @@ NEED_LOGIN_MARKERS = ("登录", "login", "sign in", "注册")
 
 COMMENT_JS = r"""
 async (maxCount) => {
-  const token = (() => {
-    const ck = document.cookie || '';
-    const names = ['csrf_token', 'XSRF-TOKEN', 'xsrf-token', 'csrftoken', 'token', 'pjwt'];
-    for (const n of names) {
-      const m = ck.match(new RegExp('(?:^|;\\s*)' + n + '=([^;]+)'));
-      if (m) return decodeURIComponent(m[1]);
+  // 从当前页面 DOM 提取帖子 ID（兼容相对/绝对链接）
+  const postLinks = Array.from(document.querySelectorAll('a[href*="/post-"]'));
+  const postIds = [];
+  const seen = new Set();
+  for (const a of postLinks) {
+    const m = a.href.match(/post-(\d+)/);
+    if (m && !seen.has(m[1])) {
+      seen.add(m[1]);
+      postIds.push(m[1]);
     }
-    const meta = document.querySelector('meta[name="csrf-token"]');
-    if (meta && meta.content) return meta.content;
-    const inp = document.querySelector('input[name="csrf_token"], input[name="_token"]');
-    if (inp && inp.value) return inp.value;
-    return '';
-  })();
-  const base = {'Accept': 'application/json, text/plain, */*', 'X-Requested-With': 'XMLHttpRequest'};
-  if (token) base['X-CSRF-Token'] = token;
-
-  const viaXhr = (url, body, ctype) => new Promise((resolve) => {
-    let done = false;
-    const X = new XMLHttpRequest();
-    const fin = (r) => { if (!done) { done = true; resolve(r); } };
-    try {
-      X.open('POST', url, true); X.withCredentials = true; X.timeout = 15000;
-      Object.entries({'Content-Type': ctype, ...base}).forEach(([k, v]) => { try { X.setRequestHeader(k, v); } catch (e) {} });
-      X.onload = () => fin({status: X.status, text: X.responseText || ''});
-      X.onerror = () => fin({status: 0, text: '', err: 'xhr blocked'});
-      X.ontimeout = () => fin({status: 0, text: '', err: 'xhr timeout'});
-      X.send(body);
-    } catch (e) { fin({status: 0, text: '', err: String(e)}); }
-  });
-
-  // 尝试多个端点获取帖子列表
-  let posts = [];
-  const endpoints = [
-    '/categories/daily?page=1',      // 日常版块
-    '/categories/tech?page=1',       // 技术版块
-    '/categories/sandbox?page=1',    // 沙盒版块
-    '/page-1',                       // 首页
-    '/api/attendance/board?page=1',  // 签到榜（备选）
-  ];
-
-  for (const ep of endpoints) {
-    const resp = await new Promise((resolve) => {
-      const X = new XMLHttpRequest();
-      X.open('GET', ep, true);
-      X.withCredentials = true; X.timeout = 15000;
-      Object.entries(base).forEach(([k, v]) => { try { X.setRequestHeader(k, v); } catch (e) {} });
-      X.onload = () => resolve({status: X.status, text: X.responseText || ''});
-      X.onerror = () => resolve({status: 0, text: ''});
-      X.ontimeout = () => resolve({status: 0, text: ''});
-      X.send();
-    });
-    if (resp.status === 200) {
-      try {
-        const bd = JSON.parse(resp.text || '{}');
-        // 尝试多种可能的数据结构
-        let list = (bd.data && bd.data.list) || bd.list || bd.data || bd.posts || bd.items || bd.threads || [];
-        if (list.length > 0) {
-          posts = list;
-          console.log('获取帖子成功:', ep, '数量:', posts.length);
-          break;
-        }
-      } catch(e) { console.log('解析失败:', ep, e); }
-    }
-  }
-
-  // 如果 API 全失败，从页面 DOM 抓取帖子链接（兜底）
-  if (posts.length === 0) {
-    const links = Array.from(document.querySelectorAll('a[href^="/post-"]'));
-    posts = links.map(a => ({id: a.href.match(/post-(\d+)/)?.[1], url: a.href})).filter(p => p.id);
-    console.log('DOM兜底获取帖子:', posts.length);
   }
 
   let success = 0;
-  for (const p of posts) {
+  for (const postId of postIds) {
     if (success >= maxCount) break;
-    const postId = p.id || p.post_id || p.postId || p.thread_id || p.tid;
-    if (!postId) continue;
+
+    // NodeSeek 使用客户端随机生成的 Csrf-Token（16位）
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+    const csrf = Array.from({length: 16}, () => chars[Math.floor(Math.random() * 62)]).join('');
+
     const body = '第 ' + (success+1) + ' 条评论，继续攒鸡腿 🐔';
-    // 尝试多种评论参数格式
-    const paramsList = [
-      {content: body, mode: 'new-comment', postId: postId},
-      {content: body, post_id: postId},
-      {message: body, postId: postId},
-      {content: body, postId: parseInt(postId)},
-    ];
-    let commented = false;
-    for (const params of paramsList) {
-      const r = await viaXhr('/api/content/new-comment',
-        JSON.stringify(params),
-        'application/json');
-      if (r.status === 200) {
-        try {
-          const d = JSON.parse(r.text || '{}');
-          if (d.code === 0 || d.status === 200 || d.success === true) { success++; commented = true; break; }
-          console.log('评论失败响应:', params, d);
-        } catch(e) {}
-      } else {
-        console.log('评论 HTTP 失败:', params, r.status, r.text);
-      }
+    const payload = JSON.stringify({content: body, mode: 'new-comment', postId: parseInt(postId)});
+
+    const r = await new Promise((resolve) => {
+      const X = new XMLHttpRequest();
+      X.open('POST', '/api/content/new-comment', true);
+      X.withCredentials = true;
+      X.timeout = 15000;
+      X.setRequestHeader('Content-Type', 'application/json');
+      X.setRequestHeader('Csrf-Token', csrf);
+      X.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
+      X.setRequestHeader('Referer', location.origin + '/post-' + postId + '-1');
+      X.setRequestHeader('Origin', location.origin);
+      X.onload = () => resolve({status: X.status, text: X.responseText || ''});
+      X.onerror = () => resolve({status: 0, text: ''});
+      X.ontimeout = () => resolve({status: 0, text: ''});
+      X.send(payload);
+    });
+
+    if (r.status === 200) {
+      try {
+        const d = JSON.parse(r.text || '{}');
+        if (d.code === 0 || d.status === 200 || d.success === true) {
+          success++;
+        }
+      } catch(e) {}
     }
-    if (!commented) console.log('该帖子所有参数格式均失败:', postId);
   }
-  return {status: 200, text: JSON.stringify({success: success, total: maxCount, tried: posts.length})};
+  return {status: 200, text: JSON.stringify({success: success, total: maxCount, tried: postIds.length})};
 }
 """
 
@@ -339,7 +285,8 @@ def do_comments(headless=True, hidden=False):
             try:
                 inject_cookies(ctx)
                 page = ctx.new_page()
-                page.goto(SITE + "/board", wait_until="domcontentloaded", timeout=45000)
+                # 首页 /board 是签到页，帖子列表在首页 /
+                page.goto(SITE + "/", wait_until="domcontentloaded", timeout=45000)
                 html = ""
                 for _ in range(6):
                     time.sleep(2)
@@ -352,6 +299,12 @@ def do_comments(headless=True, hidden=False):
                     return {"kind": "retry", "msg": "Cloudflare 挑战页未通过，稍后重试", "browser": ch}
                 if looks_logged_out(html):
                     return {"kind": "needlogin", "msg": "浏览器里没有登录态，请点「登录/更新登录态」", "browser": ch}
+                # 调试：先看看页面里有多少 post 链接
+                debug_info = page.evaluate("""() => {
+                    const links = Array.from(document.querySelectorAll('a[href*="/post-"]'));
+                    return {count: links.length, sample: links.slice(0,3).map(a => a.href)};
+                }""")
+                log("评论调试: post链接数=%d, 示例=%s" % (debug_info.get("count",0), debug_info.get("sample",[])))
                 r = page.evaluate(COMMENT_JS, COMMENT_DAILY_LIMIT)
                 data = r.get("data") if isinstance(r.get("data"), dict) else None
                 if data is None:
