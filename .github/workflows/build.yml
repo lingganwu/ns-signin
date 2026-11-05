@@ -30,6 +30,10 @@ jobs:
           pyinstaller --noconfirm --onefile --windowed --name "NS签到助手" `
             --collect-all playwright ns_signin.py
 
+      - name: Rename for GitHub upload
+        run: |
+          Copy-Item "dist/NS签到助手.exe" "dist/NS_Checkin_Assistant.exe" -Force
+
       - name: Extract version
         id: version
         run: |
@@ -42,13 +46,13 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/NS签到助手.exe
+          files: dist/NS_Checkin_Assistant.exe
           name: NS签到助手
           tag_name: v${{ steps.version.outputs.version }}
           generate_release_notes: true
 
       - uses: actions/upload-artifact@v4
         with:
-          name: NS签到助手-win64
-          path: dist/NS签到助手.exe
+          name: NS_Checkin_Assistant-win64
+          path: dist/NS_Checkin_Assistant.exe
           if-no-files-found: error

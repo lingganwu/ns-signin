@@ -237,6 +237,20 @@ async (maxCount) => {
   for (const postId of postIds) {
     if (success >= maxCount) break;
 
+    // 先访问帖子页面（参考 nodeseek-mcp client.py publish_comment 流程）
+    try {
+      await new Promise((resolve) => {
+        const X = new XMLHttpRequest();
+        X.open('GET', '/post-' + postId + '-1', true);
+        X.withCredentials = true;
+        X.timeout = 15000;
+        X.onload = () => resolve({status: X.status});
+        X.onerror = () => resolve({status: 0});
+        X.ontimeout = () => resolve({status: 0});
+        X.send();
+      });
+    } catch(e) {}
+
     // NodeSeek 使用客户端随机生成的 Csrf-Token（16位）
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
     const csrf = Array.from({length: 16}, () => chars[Math.floor(Math.random() * 62)]).join('');
@@ -273,8 +287,9 @@ async (maxCount) => {
 }
 """
 
-def do_comments(headless=True, hidden=False):
-    """在最新帖子下评论，每次 +1 鸡腿，每日上限 20 条。"""
+def do_comments(headless=False, hidden=True):
+    """在最新帖子下评论，每次 +1 鸡腿，每日上限 20 条。
+    默认隐身有头：无头必被 Cloudflare 拦，页面根本没有帖子列表。"""
     try:
         from playwright.sync_api import sync_playwright
     except Exception as e:
@@ -285,26 +300,49 @@ def do_comments(headless=True, hidden=False):
             try:
                 inject_cookies(ctx)
                 page = ctx.new_page()
-                # 首页 /board 是签到页，帖子列表在首页 /
-                page.goto(SITE + "/", wait_until="domcontentloaded", timeout=45000)
-                html = ""
-                for _ in range(6):
-                    time.sleep(2)
-                    title = (page.title() or "")
-                    if re.search(r"just a moment|attention required|verify you are a human", title, re.I):
+
+                # 拦截评论 API 响应用于调试
+                api_responses = []
+                def _on_response(resp):
+                    if "/api/content/new-comment" in resp.url:
+                        try:
+                            api_responses.append({"url": resp.url, "status": resp.status, "body": resp.text()[:500]})
+                        except Exception:
+                            api_responses.append({"url": resp.url, "status": resp.status, "body": "<unreadable>"})
+                page.on("response", _on_response)
+
+                # 尝试多个可能包含帖子列表的 URL
+                urls_to_try = [SITE + "/categories/daily", SITE + "/", SITE + "/board"]
+                post_links_found = False
+
+                for url in urls_to_try:
+                    page.goto(url, wait_until="domcontentloaded", timeout=45000)
+                    html = ""
+                    for _ in range(6):
+                        time.sleep(2)
+                        title = (page.title() or "")
+                        if re.search(r"just a moment|attention required|verify you are a human", title, re.I):
+                            continue
+                        html = page.content()[:20000]
+                        break
+
+                    if re.search(r"just a moment|attention required", (page.title() or ""), re.I):
+                        log("评论: %s 被 Cloudflare 拦截，尝试下一个" % url)
                         continue
-                    html = page.content()[:20000]
-                    break
-                if re.search(r"just a moment|attention required", (page.title() or ""), re.I):
-                    return {"kind": "retry", "msg": "Cloudflare 挑战页未通过，稍后重试", "browser": ch}
-                if looks_logged_out(html):
-                    return {"kind": "needlogin", "msg": "浏览器里没有登录态，请点「登录/更新登录态」", "browser": ch}
-                # 调试：先看看页面里有多少 post 链接
-                debug_info = page.evaluate("""() => {
-                    const links = Array.from(document.querySelectorAll('a[href*="/post-"]'));
-                    return {count: links.length, sample: links.slice(0,3).map(a => a.href)};
-                }""")
-                log("评论调试: post链接数=%d, 示例=%s" % (debug_info.get("count",0), debug_info.get("sample",[])))
+
+                    if looks_logged_out(html):
+                        log("评论: %s 检测到未登录，尝试下一个" % url)
+                        continue
+
+                    count = page.evaluate("() => document.querySelectorAll('a[href*=\"/post-\"]').length")
+                    log("评论: %s 页面 post 链接数=%d" % (url, count))
+                    if count > 0:
+                        post_links_found = True
+                        break
+
+                if not post_links_found:
+                    return {"kind": "fail", "msg": "所有页面均未找到帖子链接或未登录", "browser": ch}
+
                 r = page.evaluate(COMMENT_JS, COMMENT_DAILY_LIMIT)
                 data = r.get("data") if isinstance(r.get("data"), dict) else None
                 if data is None:
@@ -314,9 +352,15 @@ def do_comments(headless=True, hidden=False):
                         data = {}
                 success = int(data.get("success", 0))
                 total = int(data.get("total", COMMENT_DAILY_LIMIT))
+                tried = int(data.get("tried", 0))
+
+                # 记录 API 响应供调试
+                for ar in api_responses:
+                    log("评论API: %s status=%d body=%s" % (ar["url"], ar["status"], ar["body"]))
+
                 if success > 0:
-                    return {"kind": "ok", "msg": "评论完成：成功 %d/%d 条" % (success, total), "browser": ch}
-                return {"kind": "fail", "msg": "评论未成功，可能帖子列表为空或接口限制"}
+                    return {"kind": "ok", "msg": "评论完成：成功 %d/%d 条（共尝试 %d 个帖子）" % (success, total, tried), "browser": ch}
+                return {"kind": "fail", "msg": "评论未成功：尝试了 %d 个帖子，成功 0 条" % tried}
             finally:
                 ctx.close()
     except Exception as e:
