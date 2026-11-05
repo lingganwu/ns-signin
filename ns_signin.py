@@ -16,7 +16,7 @@ from datetime import datetime, timedelta
 
 IS_WIN = sys.platform.startswith("win")
 APP_NAME = "NS签到助手"
-VERSION = "1.3.0"
+VERSION = "1.3.1"
 SITE = "https://www.nodeseek.com"
 API_PATH = "/api/attendance"
 COMMENT_API = "/api/content/new-comment"
@@ -251,23 +251,44 @@ async (maxCount) => {
     } catch (e) { fin({status: 0, text: '', err: String(e)}); }
   });
 
-  // 从 board 页面获取帖子列表
-  const postsResp = await new Promise((resolve) => {
-    const X = new XMLHttpRequest();
-    X.open('GET', '/api/attendance/board?page=1', true);
-    X.withCredentials = true; X.timeout = 15000;
-    Object.entries(base).forEach(([k, v]) => { try { X.setRequestHeader(k, v); } catch (e) {} });
-    X.onload = () => resolve({status: X.status, text: X.responseText || ''});
-    X.onerror = () => resolve({status: 0, text: ''});
-    X.ontimeout = () => resolve({status: 0, text: ''});
-    X.send();
-  });
-
+  // 尝试多个端点获取帖子列表
   let posts = [];
-  try {
-    const bd = JSON.parse(postsResp.text || '{}');
-    posts = (bd.data && bd.data.list) || bd.list || bd.data || [];
-  } catch(e) { posts = []; }
+  const endpoints = [
+    '/categories/daily?page=1',      // 日常版块
+    '/categories/tech?page=1',       // 技术版块
+    '/page-1',                       // 首页
+    '/api/attendance/board?page=1',  // 签到榜（备选）
+  ];
+
+  for (const ep of endpoints) {
+    const resp = await new Promise((resolve) => {
+      const X = new XMLHttpRequest();
+      X.open('GET', ep, true);
+      X.withCredentials = true; X.timeout = 15000;
+      Object.entries(base).forEach(([k, v]) => { try { X.setRequestHeader(k, v); } catch (e) {} });
+      X.onload = () => resolve({status: X.status, text: X.responseText || ''});
+      X.onerror = () => resolve({status: 0, text: ''});
+      X.ontimeout = () => resolve({status: 0, text: ''});
+      X.send();
+    });
+    if (resp.status === 200) {
+      try {
+        const bd = JSON.parse(resp.text || '{}');
+        // 尝试多种可能的数据结构
+        let list = (bd.data && bd.data.list) || bd.list || bd.data || bd.posts || bd.items || [];
+        if (list.length > 0) {
+          posts = list;
+          break;
+        }
+      } catch(e) { /* 忽略解析错误，尝试下一个端点 */ }
+    }
+  }
+
+  // 如果 API 全失败，从页面 DOM 抓取帖子链接（兜底）
+  if (posts.length === 0) {
+    const links = Array.from(document.querySelectorAll('a[href^="/post-"]'));
+    posts = links.map(a => ({id: a.href.match(/post-(\d+)/)?.[1], url: a.href})).filter(p => p.id);
+  }
 
   let success = 0;
   for (const p of posts) {
@@ -282,10 +303,13 @@ async (maxCount) => {
       try {
         const d = JSON.parse(r.text || '{}');
         if (d.code === 0 || d.status === 200) { success++; continue; }
+        console.log('评论失败响应:', d);
       } catch(e) {}
+    } else {
+      console.log('评论 HTTP 失败:', r.status, r.text);
     }
   }
-  return {status: 200, text: JSON.stringify({success: success, total: maxCount})};
+  return {status: 200, text: JSON.stringify({success: success, total: maxCount, tried: posts.length})};
 }
 """
 
