@@ -46,10 +46,30 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/NS_Checkin_Assistant.exe#NS签到助手.exe
+          files: dist/NS_Checkin_Assistant.exe
           name: NS签到助手
           tag_name: v${{ steps.version.outputs.version }}
           generate_release_notes: true
+
+      - name: Set asset display name to Chinese
+        shell: pwsh
+        run: |
+          $token = "${{ secrets.GITHUB_TOKEN }}"
+          $releaseId = (curl -s -H "Authorization: token $token" `
+            "https://api.github.com/repos/${{ github.repository }}/releases/tags/v${{ steps.version.outputs.version }}" `
+            | ConvertFrom-Json).id
+          $assets = curl -s -H "Authorization: token $token" `
+            "https://api.github.com/repos/${{ github.repository }}/releases/$releaseId/assets" `
+            | ConvertFrom-Json
+          foreach ($a in $assets) {
+            if ($a.name -eq "NS_Checkin_Assistant.exe") {
+              curl -X PATCH -H "Authorization: token $token" `
+                -H "Content-Type: application/json" `
+                -d '{"label":"NS签到助手.exe"}' `
+                "https://uploads.github.com/repos/${{ github.repository }}/releases/$releaseId/assets/$($a.id)"
+              Write-Host "Set label for asset $($a.id) -> NS签到助手.exe"
+            }
+          }
 
       - uses: actions/upload-artifact@v4
         with:
