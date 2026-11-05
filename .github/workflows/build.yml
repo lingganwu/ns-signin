@@ -28,8 +28,22 @@ jobs:
           pyinstaller --noconfirm --onefile --windowed --name "NS签到助手" `
             --collect-all playwright ns_signin.py
 
+      - name: Extract version
+        id: version
+        run: |
+          $v = (Select-String -Path ns_signin.py -Pattern '^VERSION = "([^"]+)"').Matches[0].Groups[1].Value
+          "version=$v" >> $env:GITHUB_OUTPUT
+
       - name: Smoke test import
         run: python -c "import ast; ast.parse(open('ns_signin.py', encoding='utf-8').read()); print('syntax ok')"
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/NS签到助手.exe
+          name: v${{ steps.version.outputs.version }}
+          tag_name: v${{ steps.version.outputs.version }}
+          generate_release_notes: true
 
       - uses: actions/upload-artifact@v4
         with:
