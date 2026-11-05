@@ -16,7 +16,7 @@ from datetime import datetime, timedelta
 
 IS_WIN = sys.platform.startswith("win")
 APP_NAME = "NS签到助手"
-VERSION = "1.3.1"
+VERSION = "1.3.2"
 SITE = "https://www.nodeseek.com"
 API_PATH = "/api/attendance"
 COMMENT_API = "/api/content/new-comment"
@@ -223,7 +223,7 @@ COMMENT_JS = r"""
 async (maxCount) => {
   const token = (() => {
     const ck = document.cookie || '';
-    const names = ['csrf_token', 'XSRF-TOKEN', 'xsrf-token', 'csrftoken', 'token'];
+    const names = ['csrf_token', 'XSRF-TOKEN', 'xsrf-token', 'csrftoken', 'token', 'pjwt'];
     for (const n of names) {
       const m = ck.match(new RegExp('(?:^|;\\s*)' + n + '=([^;]+)'));
       if (m) return decodeURIComponent(m[1]);
@@ -256,6 +256,7 @@ async (maxCount) => {
   const endpoints = [
     '/categories/daily?page=1',      // 日常版块
     '/categories/tech?page=1',       // 技术版块
+    '/categories/sandbox?page=1',    // 沙盒版块
     '/page-1',                       // 首页
     '/api/attendance/board?page=1',  // 签到榜（备选）
   ];
@@ -275,12 +276,13 @@ async (maxCount) => {
       try {
         const bd = JSON.parse(resp.text || '{}');
         // 尝试多种可能的数据结构
-        let list = (bd.data && bd.data.list) || bd.list || bd.data || bd.posts || bd.items || [];
+        let list = (bd.data && bd.data.list) || bd.list || bd.data || bd.posts || bd.items || bd.threads || [];
         if (list.length > 0) {
           posts = list;
+          console.log('获取帖子成功:', ep, '数量:', posts.length);
           break;
         }
-      } catch(e) { /* 忽略解析错误，尝试下一个端点 */ }
+      } catch(e) { console.log('解析失败:', ep, e); }
     }
   }
 
@@ -288,26 +290,38 @@ async (maxCount) => {
   if (posts.length === 0) {
     const links = Array.from(document.querySelectorAll('a[href^="/post-"]'));
     posts = links.map(a => ({id: a.href.match(/post-(\d+)/)?.[1], url: a.href})).filter(p => p.id);
+    console.log('DOM兜底获取帖子:', posts.length);
   }
 
   let success = 0;
   for (const p of posts) {
     if (success >= maxCount) break;
-    const postId = p.id || p.post_id || p.postId;
+    const postId = p.id || p.post_id || p.postId || p.thread_id || p.tid;
     if (!postId) continue;
     const body = '第 ' + (success+1) + ' 条评论，继续攒鸡腿 🐔';
-    const r = await viaXhr('/api/content/new-comment',
-      JSON.stringify({content: body, mode: 'new-comment', postId: postId}),
-      'application/json');
-    if (r.status === 200) {
-      try {
-        const d = JSON.parse(r.text || '{}');
-        if (d.code === 0 || d.status === 200) { success++; continue; }
-        console.log('评论失败响应:', d);
-      } catch(e) {}
-    } else {
-      console.log('评论 HTTP 失败:', r.status, r.text);
+    // 尝试多种评论参数格式
+    const paramsList = [
+      {content: body, mode: 'new-comment', postId: postId},
+      {content: body, post_id: postId},
+      {message: body, postId: postId},
+      {content: body, postId: parseInt(postId)},
+    ];
+    let commented = false;
+    for (const params of paramsList) {
+      const r = await viaXhr('/api/content/new-comment',
+        JSON.stringify(params),
+        'application/json');
+      if (r.status === 200) {
+        try {
+          const d = JSON.parse(r.text || '{}');
+          if (d.code === 0 || d.status === 200 || d.success === true) { success++; commented = true; break; }
+          console.log('评论失败响应:', params, d);
+        } catch(e) {}
+      } else {
+        console.log('评论 HTTP 失败:', params, r.status, r.text);
+      }
     }
+    if (!commented) console.log('该帖子所有参数格式均失败:', postId);
   }
   return {status: 200, text: JSON.stringify({success: success, total: maxCount, tried: posts.length})};
 }
