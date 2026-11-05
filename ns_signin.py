@@ -16,9 +16,11 @@ from datetime import datetime, timedelta
 
 IS_WIN = sys.platform.startswith("win")
 APP_NAME = "NS签到助手"
-VERSION = "1.2.3"
+VERSION = "1.3.0"
 SITE = "https://www.nodeseek.com"
 API_PATH = "/api/attendance"
+COMMENT_API = "/api/content/new-comment"
+COMMENT_DAILY_LIMIT = 20
 
 def app_dir():
     """可写数据目录：打包后用 EXE 同级目录，开发时用脚本目录。"""
@@ -216,6 +218,118 @@ async (rv) => {
 """
 
 NEED_LOGIN_MARKERS = ("登录", "login", "sign in", "注册")
+
+COMMENT_JS = r"""
+async (maxCount) => {
+  const token = (() => {
+    const ck = document.cookie || '';
+    const names = ['csrf_token', 'XSRF-TOKEN', 'xsrf-token', 'csrftoken', 'token'];
+    for (const n of names) {
+      const m = ck.match(new RegExp('(?:^|;\\s*)' + n + '=([^;]+)'));
+      if (m) return decodeURIComponent(m[1]);
+    }
+    const meta = document.querySelector('meta[name="csrf-token"]');
+    if (meta && meta.content) return meta.content;
+    const inp = document.querySelector('input[name="csrf_token"], input[name="_token"]');
+    if (inp && inp.value) return inp.value;
+    return '';
+  })();
+  const base = {'Accept': 'application/json, text/plain, */*', 'X-Requested-With': 'XMLHttpRequest'};
+  if (token) base['X-CSRF-Token'] = token;
+
+  const viaXhr = (url, body, ctype) => new Promise((resolve) => {
+    let done = false;
+    const X = new XMLHttpRequest();
+    const fin = (r) => { if (!done) { done = true; resolve(r); } };
+    try {
+      X.open('POST', url, true); X.withCredentials = true; X.timeout = 15000;
+      Object.entries({'Content-Type': ctype, ...base}).forEach(([k, v]) => { try { X.setRequestHeader(k, v); } catch (e) {} });
+      X.onload = () => fin({status: X.status, text: X.responseText || ''});
+      X.onerror = () => fin({status: 0, text: '', err: 'xhr blocked'});
+      X.ontimeout = () => fin({status: 0, text: '', err: 'xhr timeout'});
+      X.send(body);
+    } catch (e) { fin({status: 0, text: '', err: String(e)}); }
+  });
+
+  // 从 board 页面获取帖子列表
+  const postsResp = await new Promise((resolve) => {
+    const X = new XMLHttpRequest();
+    X.open('GET', '/api/attendance/board?page=1', true);
+    X.withCredentials = true; X.timeout = 15000;
+    Object.entries(base).forEach(([k, v]) => { try { X.setRequestHeader(k, v); } catch (e) {} });
+    X.onload = () => resolve({status: X.status, text: X.responseText || ''});
+    X.onerror = () => resolve({status: 0, text: ''});
+    X.ontimeout = () => resolve({status: 0, text: ''});
+    X.send();
+  });
+
+  let posts = [];
+  try {
+    const bd = JSON.parse(postsResp.text || '{}');
+    posts = (bd.data && bd.data.list) || bd.list || bd.data || [];
+  } catch(e) { posts = []; }
+
+  let success = 0;
+  for (const p of posts) {
+    if (success >= maxCount) break;
+    const postId = p.id || p.post_id || p.postId;
+    if (!postId) continue;
+    const body = '第 ' + (success+1) + ' 条评论，继续攒鸡腿 🐔';
+    const r = await viaXhr('/api/content/new-comment',
+      JSON.stringify({content: body, mode: 'new-comment', postId: postId}),
+      'application/json');
+    if (r.status === 200) {
+      try {
+        const d = JSON.parse(r.text || '{}');
+        if (d.code === 0 || d.status === 200) { success++; continue; }
+      } catch(e) {}
+    }
+  }
+  return {status: 200, text: JSON.stringify({success: success, total: maxCount})};
+}
+"""
+
+def do_comments(headless=True, hidden=False):
+    """在最新帖子下评论，每次 +1 鸡腿，每日上限 20 条。"""
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception as e:
+        return {"kind": "fail", "msg": "Playwright 未安装：%s" % e}
+    try:
+        with sync_playwright() as pw:
+            ctx, ch = make_context(pw, headless=headless, hidden=hidden)
+            try:
+                inject_cookies(ctx)
+                page = ctx.new_page()
+                page.goto(SITE + "/board", wait_until="domcontentloaded", timeout=45000)
+                html = ""
+                for _ in range(6):
+                    time.sleep(2)
+                    title = (page.title() or "")
+                    if re.search(r"just a moment|attention required|verify you are a human", title, re.I):
+                        continue
+                    html = page.content()[:20000]
+                    break
+                if re.search(r"just a moment|attention required", (page.title() or ""), re.I):
+                    return {"kind": "retry", "msg": "Cloudflare 挑战页未通过，稍后重试", "browser": ch}
+                if looks_logged_out(html):
+                    return {"kind": "needlogin", "msg": "浏览器里没有登录态，请点「登录/更新登录态」", "browser": ch}
+                r = page.evaluate(COMMENT_JS, COMMENT_DAILY_LIMIT)
+                data = r.get("data") if isinstance(r.get("data"), dict) else None
+                if data is None:
+                    try:
+                        data = json.loads(r.get("text", "{}"))
+                    except Exception:
+                        data = {}
+                success = int(data.get("success", 0))
+                total = int(data.get("total", COMMENT_DAILY_LIMIT))
+                if success > 0:
+                    return {"kind": "ok", "msg": "评论完成：成功 %d/%d 条" % (success, total), "browser": ch}
+                return {"kind": "fail", "msg": "评论未成功，可能帖子列表为空或接口限制"}
+            finally:
+                ctx.close()
+    except Exception as e:
+        return {"kind": "fail", "msg": "评论异常：%s" % (e,)}
 
 def looks_logged_out(page_html):
     """未登录判定：站点真实标志（陌生人欢迎语 / signIn.html 入口 / 密码输入框）。"""
@@ -640,6 +754,18 @@ class Scheduler(threading.Thread):
             res = {"kind": "fail", "msg": str(e)}
 
         if (res or {}).get("kind") in ("ok", "already"):
+            # 签到成功后顺手评论攒鸡腿
+            try:
+                self._emit("running", "签到完成，开始评论攒鸡腿…")
+                cr = do_comments()
+                if cr["kind"] == "ok":
+                    self._emit("ok", cr["msg"])
+                elif cr["kind"] == "needlogin":
+                    self._emit("needlogin", cr["msg"])
+                else:
+                    self._emit("fail", cr["msg"])
+            except Exception as e:
+                log("评论异常: %s" % e)
             self._wait(300)
             return
         gap = max(1, int(CONFIG.get("retry_minutes", 30) or 30)) * 60
@@ -975,6 +1101,19 @@ def build_ui():
                 emit("fail", r["msg"])
         threading.Thread(target=run, daemon=True).start()
 
+    def do_comment():
+        set_buttons("running")
+        emit("running", "开始评论攒鸡腿…")
+        def run():
+            r = do_comments()
+            if r["kind"] == "ok":
+                emit("ok", r["msg"])
+            elif r["kind"] == "needlogin":
+                emit("needlogin", r["msg"])
+            else:
+                emit("fail", r["msg"])
+        threading.Thread(target=run, daemon=True).start()
+
     def start_scheduler():
         if sched["thread"] is not None and sched["thread"].is_alive():
             emit("waiting", "后台调度已在运行中")
@@ -1017,8 +1156,10 @@ def build_ui():
     state["btn"]["login"].grid(row=0, column=0, padx=(0, 6))
     state["btn"]["check"] = tk.Button(btns, text="② 立即签到", width=13, command=do_check)
     state["btn"]["check"].grid(row=0, column=1, padx=6)
+    state["btn"]["comment"] = tk.Button(btns, text="④ 评论攒鸡腿", width=13, command=do_comment)
+    state["btn"]["comment"].grid(row=0, column=2, padx=6)
     state["btn"]["sched"] = tk.Button(btns, text="③ 启动后台调度", width=16, command=start_scheduler)
-    state["btn"]["sched"].grid(row=0, column=2, padx=(6, 0))
+    state["btn"]["sched"].grid(row=0, column=3, padx=(6, 0))
 
     def open_settings():
         build_settings_dialog(root, lambda: (refresh_state(),
@@ -1052,6 +1193,7 @@ def build_ui():
 
     tip(state["btn"]["login"], "弹出真实浏览器窗口登录 NS\n（含人机验证，成功后自动关闭并保存登录态）")
     tip(state["btn"]["check"], "马上尝试签到一次\n用于验证登录态是否正常")
+    tip(state["btn"]["comment"], "每天在最新帖子下评论 20 条\n每条 +1 鸡腿（签到后也会自动执行）")
     tip(state["btn"]["sched"], "开启后按设置的时间窗每天自动签到\n（本程序/托盘需保持运行，可配合开机自启）")
     tip(b_set, "签到时间窗、自动签到开关、\n关闭×的行为、开机自启")
 
