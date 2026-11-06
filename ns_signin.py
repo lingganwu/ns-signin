@@ -16,7 +16,7 @@ from datetime import datetime, timedelta
 
 IS_WIN = sys.platform.startswith("win")
 APP_NAME = "NS签到助手"
-VERSION = "1.3.6"
+VERSION = "1.3.8"
 SITE = "https://www.nodeseek.com"
 API_PATH = "/api/attendance"
 COMMENT_API = "/api/content/new-comment"
