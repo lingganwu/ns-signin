@@ -16,7 +16,7 @@ from datetime import datetime, timedelta
 
 IS_WIN = sys.platform.startswith("win")
 APP_NAME = "NS签到助手"
-VERSION = "1.3.5"
+VERSION = "1.3.6"
 SITE = "https://www.nodeseek.com"
 API_PATH = "/api/attendance"
 COMMENT_API = "/api/content/new-comment"
@@ -278,71 +278,62 @@ async (postIds) => {
 
 COMMENT_JS = COMMENT_JS_WITH_IDS
 
-def fetch_post_ids_via_http():
-    """用 Python 直接请求首页 HTML 提取帖子 ID（绕过浏览器 Cloudflare 拦截）。
-    返回 post_id 列表，失败返回空列表。"""
-    import urllib.request
-    import ssl
-    try:
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-        req = urllib.request.Request(
-            SITE + "/",
-            headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                               "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-            }
-        )
-        with urllib.request.urlopen(req, timeout=20, context=ctx) as resp:
-            html = resp.read().decode("utf-8", errors="ignore")
-        ids = []
-        seen = set()
-        for m in re.finditer(r'href="(/post-(\d+)-\d+)"', html):
-            pid = m.group(2)
-            if pid not in seen:
-                seen.add(pid)
-                ids.append(pid)
-        log("HTTP 提取: 从首页获取到 %d 个帖子 ID" % len(ids))
-        return ids
-    except Exception as e:
-        log("HTTP 提取失败: %s" % e)
-        return []
-
-
 def do_comments(headless=False, hidden=True):
     """在最新帖子下评论，每次 +1 鸡腿，每日上限 20 条。
     默认隐身有头：无头必被 Cloudflare 拦，页面根本没有帖子列表。
-    
-    策略：先用 Python HTTP 直接请求首页提取帖子 ID（绕过浏览器 CF 拦截），
-    然后用浏览器上下文发送评论请求（浏览器有登录 cookie）。"""
+
+    策略：用浏览器 fetch 请求首页 HTML（利用浏览器 TLS 栈和 cookie）提取帖子 ID，
+    然后在同一页面 context 中发送评论 XHR。"""
     try:
         from playwright.sync_api import sync_playwright
     except Exception as e:
         return {"kind": "fail", "msg": "Playwright 未安装：%s" % e}
-    
-    # 第一步：用 HTTP 获取帖子 ID（不依赖浏览器）
-    post_ids = fetch_post_ids_via_http()
-    if not post_ids:
-        return {"kind": "fail", "msg": "无法获取帖子列表（HTTP 请求失败）"}
-    
-    # 第二步：用浏览器发送评论
+
     try:
         with sync_playwright() as pw:
             ctx, ch = make_context(pw, headless=headless, hidden=hidden)
             try:
                 inject_cookies(ctx)
                 page = ctx.new_page()
-                
-                # 先访问首页建立浏览器 session（确保 cookie 有效）
+
+                # 先访问站点建立同源 context（fetch 同源才带 cookie 且无 CORS 问题）
                 try:
                     page.goto(SITE + "/", wait_until="domcontentloaded", timeout=45000)
-                    time.sleep(3)
                 except Exception:
-                    pass  # 即使首页加载失败也继续尝试评论
-                
+                    pass  # 加载失败也继续尝试
+
+                # 用浏览器 fetch 请求首页 HTML（利用浏览器 TLS 栈，避免 urllib 在 Windows 上 SSL 失败）
+                post_ids = []
+                fetch_diag = {}
+                for attempt in range(5):
+                    try:
+                        res = page.evaluate("""async (site) => {
+                          try {
+                            const resp = await fetch(site + '/', {credentials: 'include', headers: {'Accept': 'text/html'}});
+                            const html = await resp.text();
+                            const regex = /\\/post-(\\d+)-\\d+/g;
+                            const ids = [];
+                            let m;
+                            while ((m = regex.exec(html)) !== null) {
+                              if (!ids.includes(m[1])) ids.push(m[1]);
+                            }
+                            return {status: resp.status, htmlLen: html.length, ids: ids};
+                          } catch(e) { return {error: e.message, ids: []}; }
+                        }""", SITE)
+                        fetch_diag = {k: res.get(k) for k in ("status", "htmlLen", "error") if k in res}
+                        ids = res.get("ids", []) or []
+                        post_ids = [str(x) for x in ids]
+                        log("浏览器 fetch #%d: %s ids=%d" % (attempt + 1, fetch_diag, len(post_ids)))
+                        if post_ids:
+                            break
+                    except Exception as e:
+                        log("浏览器 fetch 异常: %s" % e)
+                    # 可能还在 Cloudflare 挑战页，等一会再试
+                    time.sleep(6)
+
+                if not post_ids:
+                    return {"kind": "fail", "msg": "无法获取帖子列表（fetch诊断: %s）" % fetch_diag}
+
                 # 拦截评论 API 响应用于调试
                 api_responses = []
                 def _on_response(resp):
@@ -352,8 +343,8 @@ def do_comments(headless=False, hidden=True):
                         except Exception:
                             api_responses.append({"url": resp.url, "status": resp.status, "body": "<unreadable>"})
                 page.on("response", _on_response)
-                
-                # 用浏览器执行评论（使用 HTTP 获取的帖子 ID）
+
+                # 用浏览器执行评论（使用 fetch 获取的帖子 ID）
                 r = page.evaluate(COMMENT_JS_WITH_IDS, post_ids[:COMMENT_DAILY_LIMIT])
                 data = r.get("data") if isinstance(r.get("data"), dict) else None
                 if data is None:
@@ -364,10 +355,10 @@ def do_comments(headless=False, hidden=True):
                 success = int(data.get("success", 0))
                 total = int(data.get("total", COMMENT_DAILY_LIMIT))
                 tried = int(data.get("tried", 0))
-                
+
                 for ar in api_responses:
                     log("评论API: %s status=%d body=%s" % (ar["url"], ar["status"], ar["body"]))
-                
+
                 if success > 0:
                     return {"kind": "ok", "msg": "评论完成：成功 %d/%d 条（共尝试 %d 个帖子）" % (success, total, tried), "browser": ch}
                 return {"kind": "fail", "msg": "评论未成功：尝试了 %d 个帖子，成功 0 条。API响应: %s" % (tried, api_responses[:3])}
