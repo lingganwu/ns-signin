@@ -16,7 +16,7 @@ from datetime import datetime, timedelta
 
 IS_WIN = sys.platform.startswith("win")
 APP_NAME = "NS签到助手"
-VERSION = "1.3.8"
+VERSION = "1.3.9"
 SITE = "https://www.nodeseek.com"
 API_PATH = "/api/attendance"
 COMMENT_API = "/api/content/new-comment"
@@ -1188,62 +1188,64 @@ def build_ui():
         except Exception as e:
             messagebox.showinfo(APP_NAME, "日志目录：%s" % DATA_DIR)
 
-    root.geometry("430x520")
-    frame = tk.Frame(root, padx=18, pady=16)
+    root.geometry("450x540")
+    frame = tk.Frame(root, padx=20, pady=18)
     frame.pack(fill="both", expand=True)
 
     # 顶部标题
     tk.Label(frame, text=APP_NAME, font=("Microsoft YaHei", 16, "bold"),
              foreground="#1d4ed8").pack(anchor="w")
     tk.Label(frame, text="登录一次，之后每天自动签到 + 评论攒鸡腿",
-             foreground="gray", font=("Microsoft YaHei", 10)).pack(anchor="w", pady=(0, 12))
+             foreground="gray", font=("Microsoft YaHei", 10)).pack(anchor="w", pady=(0, 16))
 
     # 运行状态条（单行，自动换行）
     status_label = tk.Label(frame, textvariable=status_var, font=("Microsoft YaHei", 10),
-                            wraplength=390, justify="left", anchor="w")
-    status_label.pack(fill="x", pady=(0, 10))
+                            wraplength=400, justify="left", anchor="w")
+    status_label.pack(fill="x", pady=(0, 14))
 
     # 状态卡片
-    card = tk.LabelFrame(frame, text="当前状态", font=("Microsoft YaHei", 10, "bold"),
-                         padx=10, pady=8, foreground="#1d4ed8")
-    card.pack(fill="x", pady=(0, 14))
+    card = tk.LabelFrame(frame, text=" 当前状态 ", font=("Microsoft YaHei", 10, "bold"),
+                         padx=12, pady=10)
+    card.pack(fill="x", pady=(0, 16))
     tk.Label(card, textvariable=result_var, font=("Microsoft YaHei", 10),
-             wraplength=390, justify="left", anchor="w").pack(anchor="w", pady=(0, 4))
+             wraplength=400, justify="left", anchor="w").pack(anchor="w", pady=(0, 6))
     login_label = tk.Label(card, textvariable=login_var, font=("Microsoft YaHei", 10, "bold"))
-    login_label.pack(anchor="w")
-    tk.Label(card, textvariable=streak_var, font=("Microsoft YaHei", 10)).pack(anchor="w")
-    tk.Label(card, textvariable=next_var, font=("Microsoft YaHei", 10)).pack(anchor="w")
+    login_label.pack(anchor="w", pady=(0, 2))
+    tk.Label(card, textvariable=streak_var, font=("Microsoft YaHei", 10)).pack(anchor="w", pady=(0, 2))
+    tk.Label(card, textvariable=next_var, font=("Microsoft YaHei", 10)).pack(anchor="w", pady=(0, 2))
     comment_var = tk.StringVar(value="")
     cl = tk.Label(card, textvariable=comment_var, font=("Microsoft YaHei", 9),
-                  foreground="#1a7f37", wraplength=390, justify="left", anchor="w")
+                  foreground="#1a7f37", wraplength=400, justify="left", anchor="w")
     cl.pack(anchor="w", pady=(4, 0))
 
     # 操作按钮 2×2 等宽网格
     btns = tk.Frame(frame)
-    btns.pack(fill="x", pady=(4, 0))
-    for c in range(4):
+    btns.pack(fill="x", pady=(2, 0))
+    for c in range(2):
         btns.columnconfigure(c, weight=1, uniform="grp")
-    state["btn"]["login"] = tk.Button(btns, text="① 登录/更新登录态", command=do_login)
-    state["btn"]["login"].grid(row=0, column=0, sticky="ew", padx=3, pady=3)
-    state["btn"]["check"] = tk.Button(btns, text="② 立即签到", command=do_check)
-    state["btn"]["check"].grid(row=0, column=1, sticky="ew", padx=3, pady=3)
-    state["btn"]["comment"] = tk.Button(btns, text="③ 评论攒鸡腿", command=do_comment)
-    state["btn"]["comment"].grid(row=1, column=0, sticky="ew", padx=3, pady=3)
-    state["btn"]["sched"] = tk.Button(btns, text="④ 启动后台调度", command=start_scheduler)
-    state["btn"]["sched"].grid(row=1, column=1, sticky="ew", padx=3, pady=3)
+    for r in range(2):
+        btns.rowconfigure(r, weight=1, uniform="grpr")
+    state["btn"]["login"] = tk.Button(btns, text="① 登录/更新", height=1, command=do_login)
+    state["btn"]["login"].grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
+    state["btn"]["check"] = tk.Button(btns, text="② 立即签到", height=1, command=do_check)
+    state["btn"]["check"].grid(row=0, column=1, sticky="nsew", padx=4, pady=4)
+    state["btn"]["comment"] = tk.Button(btns, text="③ 评论攒鸡腿", height=1, command=do_comment)
+    state["btn"]["comment"].grid(row=1, column=0, sticky="nsew", padx=4, pady=4)
+    state["btn"]["sched"] = tk.Button(btns, text="④ 启动后台调度", height=1, command=start_scheduler)
+    state["btn"]["sched"].grid(row=1, column=1, sticky="nsew", padx=4, pady=4)
 
     def open_settings():
         build_settings_dialog(root, lambda: (refresh_state(),
                                              emit("waiting", "设置已保存")))
 
     btns2 = tk.Frame(frame)
-    btns2.pack(fill="x", pady=(10, 0))
+    btns2.pack(fill="x", pady=(14, 0))
     b_set = tk.Button(btns2, text="⚙ 设置", width=14, command=open_settings)
     b_set.pack(side="left")
     tk.Button(btns2, text="打开数据/日志目录", fg="gray", bd=0, command=open_log).pack(side="right")
 
     tk.Label(frame, text="提示：首次使用按 ①→④；最小化到托盘后仍会自动签到",
-             fg="gray40", font=("Microsoft YaHei", 9)).pack(anchor="w", pady=(10, 0))
+             fg="gray40", font=("Microsoft YaHei", 9)).pack(anchor="w", pady=(14, 0))
 
     def tip(widget, text):
         holder = {"w": None}
