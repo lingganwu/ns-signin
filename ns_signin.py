@@ -878,7 +878,7 @@ def build_settings_dialog(parent, on_saved):
     from tkinter import messagebox
     top = tk.Toplevel(parent)
     top.title("设置")
-    top.geometry("400x440")
+    top.geometry("430x500")
     top.resizable(False, False)
     top.transient(parent)
     top.grab_set()
@@ -894,7 +894,7 @@ def build_settings_dialog(parent, on_saved):
     v_boot = tk.BooleanVar(value=autostart_get())
     v_exe = tk.StringVar(value=CONFIG.get("browser_exe", ""))
 
-    f = tk.Frame(top, padx=16, pady=10)
+    f = tk.Frame(top, padx=16, pady=12)
     f.pack(fill="both", expand=True)
     F = ("Microsoft YaHei", 10)
 
@@ -905,33 +905,45 @@ def build_settings_dialog(parent, on_saved):
         if p:
             v_exe.set(p)
 
-    r0 = tk.Frame(f); r0.pack(fill="x", pady=2)
+    # 每日签到时间窗
+    r0 = tk.Frame(f)
+    r0.pack(fill="x", pady=(0, 4))
     tk.Label(r0, text="每日签到时间窗", font=F).pack(side="left")
     tk.Entry(r0, textvariable=v_start, width=6, justify="center").pack(side="left", padx=(8, 2))
     tk.Label(r0, text="—", font=F).pack(side="left")
     tk.Entry(r0, textvariable=v_end, width=6, justify="center").pack(side="left", padx=(2, 8))
     tk.Label(r0, text="窗口内随机执行", fg="gray", font=F).pack(side="left")
 
-    tk.Checkbutton(f, text="启用每日自动签到", variable=v_enabled, font=F).pack(anchor="w", pady=(6, 0))
-    tk.Checkbutton(f, text="程序启动时自动开启后台调度", variable=v_sched, font=F).pack(anchor="w")
-    tk.Checkbutton(f, text="随机鸡腿（0~10），不选为固定", variable=v_random, font=F).pack(anchor="w")
-    tk.Checkbutton(f, text="后台自动签到时隐藏浏览器窗口（推荐）", variable=v_hidden, font=F).pack(anchor="w")
-    row2 = tk.Frame(f); row2.pack(fill="x", pady=2)
+    # 复选框组
+    cb = tk.LabelFrame(f, text="自动化规则", font=F, padx=8, pady=6)
+    cb.pack(fill="x", pady=(8, 0))
+    tk.Checkbutton(cb, text="启用每日自动签到", variable=v_enabled, font=F).pack(anchor="w", pady=(2, 0))
+    tk.Checkbutton(cb, text="程序启动时自动开启后台调度", variable=v_sched, font=F).pack(anchor="w")
+    tk.Checkbutton(cb, text="随机鸡腿（0~10），不选为固定", variable=v_random, font=F).pack(anchor="w")
+    tk.Checkbutton(cb, text="后台自动签到时隐藏浏览器窗口（推荐）", variable=v_hidden, font=F).pack(anchor="w")
+
+    # 失败重试
+    row2 = tk.Frame(f)
+    row2.pack(fill="x", pady=(8, 0))
     tk.Label(row2, text="失败后间隔", font=F).pack(side="left")
     tk.Entry(row2, textvariable=v_retry, width=5, justify="center").pack(side="left", padx=4)
     tk.Label(row2, text="分钟重试一次", font=F).pack(side="left")
 
-    box = tk.LabelFrame(f, text="点击右上角 × 时", font=F, padx=8, pady=2)
-    box.pack(fill="x", pady=8)
+    # 关闭行为
+    box = tk.LabelFrame(f, text="点击右上角 × 时", font=F, padx=8, pady=6)
+    box.pack(fill="x", pady=(8, 0))
     tk.Radiobutton(box, text="最小化到托盘（后台继续签到）", variable=v_close, value="tray", font=F).pack(anchor="w")
     tk.Radiobutton(box, text="直接退出程序", variable=v_close, value="exit", font=F).pack(anchor="w")
 
-    row3 = tk.Frame(f); row3.pack(fill="x", pady=2)
+    # 浏览器路径
+    row3 = tk.Frame(f)
+    row3.pack(fill="x", pady=(8, 0))
     tk.Label(row3, text="浏览器路径", font=F).pack(side="left")
     tk.Button(row3, text="浏览…", font=("Microsoft YaHei", 9), command=pick_exe).pack(side="right")
-    tk.Entry(f, textvariable=v_exe, font=("Microsoft YaHei", 9)).pack(fill="x")
-    tk.Label(f, text="留空=自动扫描本机 Edge/Chrome", fg="gray", font=("Microsoft YaHei", 9)).pack(anchor="w")
+    tk.Entry(row3, textvariable=v_exe, font=("Microsoft YaHei", 9)).pack(side="left", padx=(0, 6))
+    tk.Label(f, text="留空=自动扫描本机 Edge/Chrome", fg="gray", font=("Microsoft YaHei", 9)).pack(anchor="w", pady=(2, 0))
 
+    # 开机自启
     tk.Checkbutton(f, text="开机自动运行", variable=v_boot, font=F).pack(anchor="w", pady=(4, 0))
 
     def save():
@@ -966,7 +978,7 @@ def build_settings_dialog(parent, on_saved):
         on_saved()
 
     btns = tk.Frame(f)
-    btns.pack(pady=(12, 0))
+    btns.pack(pady=(14, 0))
     tk.Button(btns, text="保存", width=10, command=save).pack(side="left", padx=6)
     tk.Button(btns, text="取消", width=10, command=top.destroy).pack(side="left", padx=6)
 
@@ -1151,11 +1163,11 @@ def build_ui():
         def run():
             r = do_comments()
             if r["kind"] == "ok":
-                emit("ok", r["msg"])
+                _emit_comment("ok", r["msg"])
             elif r["kind"] == "needlogin":
-                emit("needlogin", r["msg"])
+                _emit_comment("needlogin", r["msg"])
             else:
-                emit("fail", r["msg"])
+                _emit_comment("fail", r["msg"])
         threading.Thread(target=run, daemon=True).start()
 
     def start_scheduler():
@@ -1176,47 +1188,62 @@ def build_ui():
         except Exception as e:
             messagebox.showinfo(APP_NAME, "日志目录：%s" % DATA_DIR)
 
-    frame = tk.Frame(root, padx=16, pady=16)
+    root.geometry("430x520")
+    frame = tk.Frame(root, padx=18, pady=16)
     frame.pack(fill="both", expand=True)
 
-    tk.Label(frame, text=APP_NAME, font=("Microsoft YaHei", 14, "bold")).pack(anchor="w")
-    tk.Label(frame, text="登录一次，之后每天自动签到", foreground="gray").pack(anchor="w", pady=(0, 10))
+    # 顶部标题
+    tk.Label(frame, text=APP_NAME, font=("Microsoft YaHei", 16, "bold"),
+             foreground="#1d4ed8").pack(anchor="w")
+    tk.Label(frame, text="登录一次，之后每天自动签到 + 评论攒鸡腿",
+             foreground="gray", font=("Microsoft YaHei", 10)).pack(anchor="w", pady=(0, 12))
 
-    status_label = tk.Label(frame, textvariable=status_var, font=("Microsoft YaHei", 11),
-                            wraplength=350, justify="left", anchor="w")
-    status_label.pack(fill="x", pady=(0, 8))
+    # 运行状态条（单行，自动换行）
+    status_label = tk.Label(frame, textvariable=status_var, font=("Microsoft YaHei", 10),
+                            wraplength=390, justify="left", anchor="w")
+    status_label.pack(fill="x", pady=(0, 10))
 
-    info = tk.LabelFrame(frame, text="状态", font=("Microsoft YaHei", 10), padx=8, pady=6)
-    info.pack(fill="x", pady=(0, 10))
-    tk.Label(info, textvariable=result_var, font=("Microsoft YaHei", 10), wraplength=350).pack(anchor="w")
-    login_label = tk.Label(info, textvariable=login_var, font=("Microsoft YaHei", 10, "bold"))
+    # 状态卡片
+    card = tk.LabelFrame(frame, text="当前状态", font=("Microsoft YaHei", 10, "bold"),
+                         padx=10, pady=8, foreground="#1d4ed8")
+    card.pack(fill="x", pady=(0, 14))
+    tk.Label(card, textvariable=result_var, font=("Microsoft YaHei", 10),
+             wraplength=390, justify="left", anchor="w").pack(anchor="w", pady=(0, 4))
+    login_label = tk.Label(card, textvariable=login_var, font=("Microsoft YaHei", 10, "bold"))
     login_label.pack(anchor="w")
-    tk.Label(info, textvariable=streak_var, font=("Microsoft YaHei", 10)).pack(anchor="w")
-    tk.Label(info, textvariable=next_var, font=("Microsoft YaHei", 10)).pack(anchor="w")
+    tk.Label(card, textvariable=streak_var, font=("Microsoft YaHei", 10)).pack(anchor="w")
+    tk.Label(card, textvariable=next_var, font=("Microsoft YaHei", 10)).pack(anchor="w")
+    comment_var = tk.StringVar(value="")
+    cl = tk.Label(card, textvariable=comment_var, font=("Microsoft YaHei", 9),
+                  foreground="#1a7f37", wraplength=390, justify="left", anchor="w")
+    cl.pack(anchor="w", pady=(4, 0))
 
+    # 操作按钮 2×2 等宽网格
     btns = tk.Frame(frame)
-    btns.pack(fill="x", pady=(6, 0))
-    state["btn"]["login"] = tk.Button(btns, text="① 登录/更新登录态", width=16, command=do_login)
-    state["btn"]["login"].grid(row=0, column=0, padx=(0, 6))
-    state["btn"]["check"] = tk.Button(btns, text="② 立即签到", width=13, command=do_check)
-    state["btn"]["check"].grid(row=0, column=1, padx=6)
-    state["btn"]["comment"] = tk.Button(btns, text="④ 评论攒鸡腿", width=13, command=do_comment)
-    state["btn"]["comment"].grid(row=0, column=2, padx=6)
-    state["btn"]["sched"] = tk.Button(btns, text="③ 启动后台调度", width=16, command=start_scheduler)
-    state["btn"]["sched"].grid(row=0, column=3, padx=(6, 0))
+    btns.pack(fill="x", pady=(4, 0))
+    for c in range(4):
+        btns.columnconfigure(c, weight=1, uniform="grp")
+    state["btn"]["login"] = tk.Button(btns, text="① 登录/更新登录态", command=do_login)
+    state["btn"]["login"].grid(row=0, column=0, sticky="ew", padx=3, pady=3)
+    state["btn"]["check"] = tk.Button(btns, text="② 立即签到", command=do_check)
+    state["btn"]["check"].grid(row=0, column=1, sticky="ew", padx=3, pady=3)
+    state["btn"]["comment"] = tk.Button(btns, text="③ 评论攒鸡腿", command=do_comment)
+    state["btn"]["comment"].grid(row=1, column=0, sticky="ew", padx=3, pady=3)
+    state["btn"]["sched"] = tk.Button(btns, text="④ 启动后台调度", command=start_scheduler)
+    state["btn"]["sched"].grid(row=1, column=1, sticky="ew", padx=3, pady=3)
 
     def open_settings():
         build_settings_dialog(root, lambda: (refresh_state(),
                                              emit("waiting", "设置已保存")))
 
     btns2 = tk.Frame(frame)
-    btns2.pack(fill="x", pady=(6, 0))
-    b_set = tk.Button(btns2, text="⚙ 设置", width=10, command=open_settings)
+    btns2.pack(fill="x", pady=(10, 0))
+    b_set = tk.Button(btns2, text="⚙ 设置", width=14, command=open_settings)
     b_set.pack(side="left")
     tk.Button(btns2, text="打开数据/日志目录", fg="gray", bd=0, command=open_log).pack(side="right")
 
-    tk.Label(frame, text="提示：首次使用按 ①→③；最小化到托盘后仍会自动签到",
-             fg="gray40", font=("Microsoft YaHei", 9)).pack(anchor="w", pady=(8, 0))
+    tk.Label(frame, text="提示：首次使用按 ①→④；最小化到托盘后仍会自动签到",
+             fg="gray40", font=("Microsoft YaHei", 9)).pack(anchor="w", pady=(10, 0))
 
     def tip(widget, text):
         holder = {"w": None}
@@ -1224,7 +1251,7 @@ def build_ui():
             t = tk.Toplevel(widget)
             t.wm_overrideredirect(True)
             tk.Label(t, text=text, background="#ffffe1", relief="solid", bd=1,
-                     font=("Microsoft YaHei", 9)).pack()
+                     font=("Microsoft YaHei", 9), wraplength=220, justify="left").pack()
             t.wm_geometry("+%d+%d" % (widget.winfo_rootx() + 12,
                                       widget.winfo_rooty() + widget.winfo_height() + 6))
             holder["w"] = t
@@ -1248,10 +1275,30 @@ def build_ui():
             minimize_to_tray()
     root.protocol("WM_DELETE_WINDOW", on_close)
 
+    def _set_comment(msg):
+        comment_var.set(msg)
+        try:
+            cl.config(foreground="#1a7f37")
+        except Exception:
+            pass
+
+    def _emit_comment(kind, msg):
+        # 评论结果单独显示在状态卡片底部
+        if kind == "ok":
+            _set_comment("✓ " + msg)
+        elif kind == "fail":
+            _set_comment("✗ " + msg)
+            try:
+                cl.config(foreground="#c00000")
+            except Exception:
+                pass
+        else:
+            _set_comment(msg)
+
     refresh_state()
     if CONFIG.get("auto_start", True) and CONFIG.get("enabled", True):
         root.after(1200, start_scheduler)
-    status_var.set("当前：" + login_snapshot_state()[1] + "。流程：登录 → 启动后台调度")
+    status_var.set("当前：" + login_snapshot_state()[1] + "。流程：①登录 → ④启动后台调度")
     pump()
     return root
 
