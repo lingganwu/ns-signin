@@ -221,7 +221,10 @@ NEED_LOGIN_MARKERS = ("登录", "login", "sign in", "注册")
 
 COMMENT_JS_WITH_IDS = r"""
 async (postIds) => {
-  // postIds 由 Python 通过 HTTP 请求首页提取（绕过浏览器 Cloudflare 拦截）
+  // postIds 由 Python 通过浏览器 fetch 提取（绕过 Cloudflare 拦截）
+  // NodeSeek 限制：每隔 2 秒才能操作一次，超速会被 429 拒绝
+  const DELAY_MS = 2600;
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   let success = 0;
   for (const postId of postIds) {
     if (success >= postIds.length) break;
@@ -270,7 +273,12 @@ async (postIds) => {
           success++;
         }
       } catch(e) {}
+    } else if (r.status === 429) {
+      // 超过 2 秒限制，稍等再试下一条
+      await sleep(3000);
     }
+    // 每条评论后冷却，避免触发 NodeSeek 429 限速
+    await sleep(DELAY_MS);
   }
   return {status: 200, text: JSON.stringify({success: success, total: postIds.length, tried: postIds.length})};
 }
