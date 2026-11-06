@@ -66,7 +66,7 @@ jobs:
               curl -X PATCH -H "Authorization: token $token" `
                 -H "Content-Type: application/json" `
                 -d '{"label":"NS签到助手.exe"}' `
-                "https://uploads.github.com/repos/${{ github.repository }}/releases/$releaseId/assets/$($a.id)"
+                "https://api.github.com/repos/${{ github.repository }}/releases/assets/$($a.id)"
               Write-Host "Set label for asset $($a.id) -> NS签到助手.exe"
             }
           }
